@@ -3,9 +3,9 @@ use hex;
 
 type ByteString = String; // Might use..?
 type Index = u32;
-type Hash = String;
+type Hash = ByteString;
 type Timestamp = u32;
-type BlockData = String;
+type BlockData = ByteString;
 type BlockChain = Vec<Block>;
 
 #[derive(Debug)]
@@ -66,19 +66,19 @@ fn calculate_hash
     , blockdata: &BlockData
     , nonce: &u64
     ) -> Hash {
-      let index_bytes = index.to_string().into_bytes();
-      let timestamp_bytes = timestamp.to_string().into_bytes();
-      let nonce_bytes = nonce.to_string().into_bytes();
-      
-      let concat_bytes = 
-          [ index_bytes
-          , previous_hash.to_string().into_bytes()
-          , timestamp_bytes
-          , blockdata.to_string().into_bytes()
-          , nonce_bytes
-          ].concat();
-
-      let mut hasher = Sha3_256::new();
-      hasher.input(concat_bytes);
-      hex::encode(hasher.result())
+        let concat_bytes = 
+            [
+            index.to_string().into_bytes(),
+            previous_hash.to_string().into_bytes(),
+            timestamp.to_string().into_bytes(),
+            blockdata.to_string().into_bytes(),
+            nonce.to_string().into_bytes(),
+            ].concat();
+        hash(&concat_bytes)
     }
+
+fn hash(bytes: &Vec<u8>) -> Hash {
+    let mut hasher = Sha3_256::new();
+    hasher.input(bytes);
+    hex::encode(hasher.result())
+}
