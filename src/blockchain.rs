@@ -1,11 +1,12 @@
 use sha3::{Digest, Sha3_256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::iter;
-use base64;
+use serde::{Deserialize, Serialize};
+use hex;
 
 type ByteString = String; // Might use..?
 type Index = u32;
-type Hash = ByteString;
+type Hash = String;
 type Timestamp = u64;
 type BlockData = ByteString;
 
@@ -59,14 +60,18 @@ impl BlockChain {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Block {
+    #[serde(rename = "bindex")]
     index : Index,
+    #[serde(rename = "previoushash")]
     previous_hash : Hash,
     timestamp : Timestamp,
+    #[serde(rename = "bdata")]
     block_data : BlockData,
     nonce : u64,
     difficulty : usize,
+    #[serde(rename = "bhash")]
     hash : Hash,
 }
 
@@ -79,7 +84,7 @@ impl Block {
         , difficulty: usize
         , nonce: u64
         ) -> Block {
-        let hash = calculate_hash_base64(&index, &previous_hash, &timestamp, &block_data, &nonce);
+        let hash = calculate_hash_hex(&index, &previous_hash, &timestamp, &block_data, &nonce);
         Block {
             index,
             previous_hash,
@@ -92,11 +97,11 @@ impl Block {
     }
 
     pub fn get_hash(&self) -> Hash {
-        calculate_hash_base64(&self.index
-                            , &self.previous_hash
-                            , &self.timestamp
-                            , &self.block_data
-                            , &self.nonce)
+        calculate_hash_hex(&self.index,
+                              &self.previous_hash,
+                              &self.timestamp,
+                              &self.block_data,
+                              &self.nonce)
     }
 }
 
@@ -107,7 +112,7 @@ pub fn genesis_block() -> Block {
     let nonce = 0;
     let difficulty = 0;
     let block_data = String::from("<<Genesis block data>>");
-    let hash = calculate_hash_base64(&index, &previous_hash, &timestamp, &block_data, &nonce);
+    let hash = calculate_hash_hex(&index, &previous_hash, &timestamp, &block_data, &nonce);
     Block {
         index,
         previous_hash,
@@ -119,7 +124,7 @@ pub fn genesis_block() -> Block {
     }
 }
 
-fn calculate_hash_base64
+fn calculate_hash_hex
     ( index: &Index
     , previous_hash: &Hash
     , timestamp: &Timestamp
@@ -135,13 +140,13 @@ fn calculate_hash_base64
           nonce.to_string().into_bytes(),
         ].concat();
 
-    hash_base64(&concat_bytes)
+    hash_hex(&concat_bytes)
 }
 
-fn hash_base64(bytes: &Vec<u8>) -> Hash {
+fn hash_hex(bytes: &Vec<u8>) -> Hash {
     let mut hasher = Sha3_256::new();
     hasher.input(bytes);
-    base64::encode(&hasher.result())
+    hex::encode(&hasher.result()[..])
 }
 
 fn now() -> u64 {
@@ -196,7 +201,7 @@ fn is_work_proven
     ) -> bool 
 {   
     let prefix: String = iter::repeat('0').take(*difficulty).collect();
-    let hash = calculate_hash_base64(&index, previous_hash, timestamp, blockdata, nonce);
+    let hash = calculate_hash_hex(&index, previous_hash, timestamp, blockdata, nonce);
 
     let hash_prefix = hash.get(0..*difficulty)
         .expect("Error when encoding hash");
