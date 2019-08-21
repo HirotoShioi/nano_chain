@@ -1,8 +1,16 @@
-use nano_chain::Block;
+extern crate sha3;
+extern crate hex;
+extern crate base64;
+
+use nano_chain::BlockChain;
 
 fn main() {
-    println!("Hello, world!");
-    let genesis_block = Block::genesis_block();
+    let mut block = BlockChain::new();
+    block.mint_block("hello_world");
+    block.mint_block("I'm from canada");
+    block.mint_block("New block chain");
+    block.mint_block("Mexico");
 
-    println!("Genesis block {:#?}", genesis_block);
+    assert!(block.is_valid_chain().is_ok());
+    println!("{:#?}", block);
 }
