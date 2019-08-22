@@ -13,6 +13,7 @@ fn main() {
     block.mint_block("I'm from canada");
     block.mint_block("New block chain");
     block.mint_block("Mexico");
+    block.mint_block("generator");
 
     assert!(block.is_valid_chain().is_ok());
     println!("{:#?}", block);
