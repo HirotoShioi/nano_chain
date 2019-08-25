@@ -26,7 +26,7 @@ impl UTXO {
         let mut store = HashMap::new();
 
         for (index, output) in outs.into_iter().enumerate() {
-            let input = Input::new(Index(index), TransactionId(0));
+            let input = Input::new(index, TransactionId(0));
             store.insert(input, output);
         }
 
@@ -38,16 +38,14 @@ impl UTXO {
     pub fn process_transactions(&mut self, transactions: Vec<Transaction>) -> Result<(), TransactionError> {
 
         for transaction in transactions.iter() {
-            match self.validate_transaction(transaction) {
-                Ok(_) => {},
-                Err(err) => return Err(err),
+            if let Err(err) = self.validate_transaction(transaction) {
+                return Err(err)
             }
         }
 
         for transaction in transactions.into_iter() {
-            match self.process_transaction(transaction) {
-                Ok(_) => {},
-                Err(err) => return Err(err),
+            if let Err(err) = self.process_transaction(transaction) {
+                return Err(err)
             };
         }
 
@@ -61,9 +59,9 @@ impl UTXO {
         }
         
         let mut input_sum = 0;
-        //First, we check that inputs are valid
         for input in transaction.inputs.iter() {
             match self.store.get(input) {
+                //Check that inputs are valid
                 None => return Err(InputNotFound(transaction.id)),
                 Some(output) => input_sum = input_sum + output.value.0,
             }
@@ -93,7 +91,7 @@ impl UTXO {
 
         //Process outputs
         for (index, output) in transaction.outputs.into_iter().enumerate() {
-            let input = Input::new(Index(index), transaction.id);
+            let input = Input::new(index, transaction.id);
             self.store.insert(input, output);
         }
 
@@ -107,8 +105,7 @@ pub struct Coin(u64);
 #[derive(Debug, Clone, PartialEq)]
 pub struct Address(String);
 
-#[derive(Debug, PartialEq, Eq, Hash)]
-pub struct Index(usize);
+type Index = usize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct TransactionId(u32);
@@ -182,7 +179,7 @@ mod utxo_test {
         let outputs = initial_outputs();
 
         for (index, output) in outputs.iter().enumerate() {
-            let input = Input::new(Index(index), TransactionId(0));
+            let input = Input::new(index, TransactionId(0));
             assert_eq!(utxo.get_output(&input), Some(output));
         } 
     }
@@ -193,7 +190,7 @@ mod utxo_test {
         let mut inputs: Vec<Input> = Vec::new();
 
         for num in 0..2 {
-            let input = Input::new(Index(num), TransactionId(0));
+            let input = Input::new(num, TransactionId(0));
             inputs.push(input);
         }
 
@@ -207,25 +204,32 @@ mod utxo_test {
         let transaction = vec![Transaction::new(TransactionId(1), inputs, outputs)];
 
         let mut utxo = test_utxo();
-        match utxo.process_transactions(transaction) {
-            Err(_) => assert!(false),
-            Ok(_) => {}
+        if let Err(_) = utxo.process_transactions(transaction) {
+            assert!(false)
         };
 
+        // Check that inputs/outputs are stored in utxo
         for (index, output) in outputs_copy.iter().enumerate() {
-            let input = Input::new(Index(index), TransactionId(1));
+            let input = Input::new(index, TransactionId(1));
             assert_eq!(utxo.get_output(&input), Some(output));
+        }
+
+        // Check that inputs are spent
+        for num in 0..2 {
+            let input = Input::new(num, TransactionId(0));
+            assert_eq!(utxo.get_output(&input), None);
         }
     }
 
     #[test]
     fn invalid_input_should_throw_error() {
 
-        let mut inputs: Vec<Input> = Vec::new();
-
         const INVALID_TX_ID: TransactionId = TransactionId(10);
+
+        // Here we create inputs that does not exist in UTXO
+        let mut inputs: Vec<Input> = Vec::new();
         for num in 0..2 {
-            let input = Input::new(Index(num), INVALID_TX_ID);
+            let input = Input::new(num, INVALID_TX_ID);
             inputs.push(input);
         }
 
@@ -249,7 +253,7 @@ mod utxo_test {
         let mut inputs: Vec<Input> = Vec::new();
 
         for num in 0..2 {
-            let input = Input::new(Index(num), TransactionId(0));
+            let input = Input::new(num, TransactionId(0));
             inputs.push(input);
         }
 
@@ -288,7 +292,7 @@ mod utxo_test {
         let mut output_sum = 0;
         let mut utxo = test_utxo();
         for num in 0..2 {
-            let input = Input::new(Index(num), TransactionId(0));
+            let input = Input::new(num, TransactionId(0));
             output_sum = output_sum + utxo.get_output(&input).unwrap().value.0;
             inputs.push(input);
         }
@@ -297,12 +301,11 @@ mod utxo_test {
         let output_copy = output.clone();
         let transaction = Transaction::new(TransactionId(1), inputs, vec![output]);
 
-        match utxo.process_transactions(vec![transaction]) {
-            Ok(_) => {},
-            Err(_) => assert!(false),
+        if let Err(_) = utxo.process_transactions(vec![transaction]) {
+            assert!(false)
         };
 
-        let input = Input::new(Index(0), TransactionId(1));
+        let input = Input::new(0, TransactionId(1));
         assert_eq!(utxo.get_output(&input), Some(&output_copy));
     }
 }
