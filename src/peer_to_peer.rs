@@ -5,8 +5,9 @@ use std::thread::{self, JoinHandle};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
 
-type ConnectionPool = Arc<Mutex<Vec<Connection>>>;
+type ConnectionPool = Arc<Mutex<HashMap<SocketAddr,Connection>>>;
 
 pub struct ConnectionManager {
     //Connection pool handling messages between peers
@@ -16,11 +17,11 @@ pub struct ConnectionManager {
 
 impl Drop for ConnectionManager {
     fn drop(&mut self) {
-        for conn in self.pools.lock().unwrap().iter() {
+        for conn in self.pools.lock().unwrap().values_mut() {
             conn.done.store(true, Ordering::Relaxed);
         }
 
-        for conn in self.pools.lock().unwrap().iter_mut() {
+        for conn in self.pools.lock().unwrap().values_mut() {
             if let Some(thread) = conn.send_thread.take() {
                 thread.join().expect("Unable to close thread");
             };
@@ -39,15 +40,13 @@ pub enum PoolError {
     UnableToConnect,
 }
 
-use super::PoolError::*;
-
 impl ConnectionManager {
     pub fn new(addrs: Vec<&str>) -> ConnectionManager {
-        let pools = Arc::new(Mutex::new(Vec::new()));
+        let pools = Arc::new(Mutex::new(HashMap::new()));
         for address in addrs.iter() {
             let conn_pool = Arc::clone(&pools);
-            if let Ok(conn) = Connection::new(address, conn_pool) {
-                pools.lock().unwrap().push(conn);
+            if let Ok((socket_addr, conn)) = Connection::new(address, conn_pool) {
+                pools.lock().unwrap().insert(socket_addr, conn);
             }
         }
         
@@ -61,8 +60,8 @@ impl ConnectionManager {
 
     pub fn add(&mut self, address: &str) -> Result<(), PoolError> {
         let conn_pool = Arc::clone(&self.pools);
-        if let Ok(conn) = Connection::new(address, conn_pool){
-            self.pools.lock().unwrap().push(conn);
+        if let Ok((socket_addr, conn)) = Connection::new(address, conn_pool){
+            self.pools.lock().unwrap().insert(socket_addr, conn);
         };
 
         Ok(())
@@ -96,8 +95,6 @@ use super::RecvMessage::*;
 
 pub struct Connection {
     // Perhaps add id field?
-    // Address
-    socket_addr: SocketAddr,
     // Thread handle for send operation
     send_thread: Option<JoinHandle<()>>,
     // Thread handle for receive operation
@@ -113,7 +110,7 @@ impl Connection {
     pub fn new
         ( address: &str, 
           conn_pool: ConnectionPool,
-        ) -> std::io::Result<Connection> {
+        ) -> std::io::Result<(SocketAddr, Connection)> {
         let socket_addr = match address.parse(){
             Ok(socket) => socket,
             Err(_) => return Err(Error::new(ErrorKind::Other, "Invalid address")),
@@ -128,11 +125,15 @@ impl Connection {
         let send_done = Arc::clone(&done);
         let mut send_stream = stream.try_clone()?;
         let send_thread = thread::spawn(move || {
-            while !send_done.load(std::sync::atomic::Ordering::Relaxed) {
+            while !send_done.load(Ordering::Relaxed) {
+                // Can you make it such that if any of the function fails,
+                // it does the same restore action?
                 let message = conn_receiver.recv()
                     .expect("Unable to receive message");
-                send_stream.write(format!("{:?}\n", &message).as_bytes())
-                    .expect("Unable to write message");
+                //If write fails, close the threads
+                if let Err(_) = send_stream.write(format!("{:?}\n", &message).as_bytes()) {
+                    send_done.store(true, Ordering::Relaxed);
+                };
                 send_stream.flush()
                     .expect("Unable to flush stream");
             }      
@@ -143,7 +144,7 @@ impl Connection {
         let mut recv_stream = stream.try_clone()?;
         recv_stream.set_read_timeout(Some(Duration::from_millis(200)))?;
         let recv_thread = thread::spawn(move || {
-            while !read_done.load(std::sync::atomic::Ordering::Relaxed) {
+            while !read_done.load(Ordering::Relaxed) {
                 // Implement:
                 // Message handling
                 // Deserialize the recv message
@@ -158,14 +159,14 @@ impl Connection {
                 };
             }
         });
-
-        Ok(Connection {
-            socket_addr,
+        
+        let conn = Connection {
             send_thread: Some(send_thread),
             recv_thread: Some(recv_thread),
             conn_sender,
             done,
-        })
+        };
+        Ok((socket_addr, conn))
     }
 }
 
@@ -175,22 +176,28 @@ impl Drop for Connection {
         self.done.store(true, Ordering::Relaxed);
         if let Some(thread) = self.send_thread.take() {
             thread.join()
-                .expect("Unable to close thread");
+                .expect("Unable to close send_thread");
         }
 
         if let Some(thread) = self.recv_thread.take() {
             thread.join()
-                .expect("Unable to close thread");
+                .expect("Unable to close recv_thread");
         }
     }
 }
 
-fn broadcast(pools: Arc<Mutex<Vec<Connection>>>, message: SendMessage) -> Result<(), PoolError> {
-    for conn in pools.lock().unwrap().iter() {
+fn broadcast(pools: ConnectionPool, message: SendMessage) -> Result<(), PoolError> {
+    let mut failed_addr = Vec::new();
+    for (socket_addr, conn) in pools.lock().unwrap().iter_mut() {
         if let Err(_) = conn.conn_sender.send(message.clone()) {
-            //pools.lock().unwrap().remove_item(&conn);
+            failed_addr.push(socket_addr.clone());
             drop(conn);
         };
     }
+
+    for socket_addr in failed_addr.iter() {
+        pools.lock().unwrap().remove(socket_addr);
+    }
+
     Ok(())
 }
