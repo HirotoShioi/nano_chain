@@ -18,17 +18,7 @@ pub struct ConnectionManager {
 impl Drop for ConnectionManager {
     fn drop(&mut self) {
         for conn in self.pools.lock().unwrap().values_mut() {
-            conn.done.store(true, Ordering::Relaxed);
-        }
-
-        for conn in self.pools.lock().unwrap().values_mut() {
-            if let Some(thread) = conn.send_thread.take() {
-                thread.join().expect("Unable to close thread");
-            };
-
-            if let Some(thread) = conn.recv_thread.take() {
-                thread.join().expect("Unable to close thread");
-            };            
+            drop(conn);
         }
     }
 }
@@ -91,8 +81,6 @@ pub enum RecvMessage {
     Peer(String),
 }
 
-use super::RecvMessage::*;
-
 pub struct Connection {
     // Perhaps add id field?
     // Thread handle for send operation
@@ -130,7 +118,7 @@ impl Connection {
                 // it does the same restore action?
                 let message = conn_receiver.recv()
                     .expect("Unable to receive message");
-                //If write fails, close the threads
+                //If write fails due to broken pipe, close the threads
                 if let Err(_) = send_stream.write(format!("{:?}\n", &message).as_bytes()) {
                     send_done.store(true, Ordering::Relaxed);
                 };
