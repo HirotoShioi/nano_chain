@@ -5,16 +5,15 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub struct ConnectionPool {
+type ConnectionPool = Arc<Mutex<Vec<Connection>>>;
+
+pub struct ConnectionManager {
     //Connection pool handling messages between peers
-    pools: Arc<Mutex<Vec<Connection>>>,
-    //Copy of broadcast send end, when spawning new connections, pass this
-    sender: mpsc::Sender<RecvMessage>,
-    receiver: mpsc::Receiver<RecvMessage>,
+    pools: ConnectionPool,
     started: bool,
 }
 
-impl Drop for ConnectionPool {
+impl Drop for ConnectionManager {
     fn drop(&mut self) {
         for conn in self.pools.lock().unwrap().iter() {
             conn.done.store(true, Ordering::Relaxed);
@@ -41,63 +40,58 @@ pub enum PoolError {
 
 use super::PoolError::*;
 
-impl ConnectionPool {
-    pub fn new(addrs: Vec<&str>) -> ConnectionPool {
-        let mut pools = Vec::new();
-        let (sender, receiver) = mpsc::channel();
-
+impl ConnectionManager {
+    pub fn new(addrs: Vec<&str>) -> ConnectionManager {
+        let pools = Arc::new(Mutex::new(Vec::new()));
         for address in addrs.iter() {
-            let conn_sender = sender.clone();
-            if let Ok(conn) = Connection::new(address, conn_sender) {
-                pools.push(conn);
+            let conn_pool = Arc::clone(&pools);
+            if let Ok(conn) = Connection::new(address, conn_pool) {
+                pools.lock().unwrap().push(conn);
             }
         }
+        
+        //start server here
 
-        ConnectionPool {
-            pools: Arc::new(Mutex::new(pools)),
-            sender,
-            receiver,
-            started: false,
+        ConnectionManager {
+            pools,
+            started: true,
         }
     }
 
     pub fn add(&mut self, address: &str) -> Result<(), PoolError> {
-
-        let conn = Connection::new(address, self.sender.clone())?;
+        let conn_pool = Arc::clone(&self.pools);
+        let conn = Connection::new(address, conn_pool)?;
 
         self.pools.lock().unwrap().push(conn);
 
         Ok(())
     }
 
-    //start function
-
     pub fn broadcast(&self, message: SendMessage) -> Result<(), PoolError>{
-        
-        if self.pools.lock().unwrap().len() <= 0 {
-            return Err(PoolError::NoPool)
-        }
-
-        for conn in self.pools.lock().unwrap().iter() {
-            conn.conn_sender.send(message.clone()).unwrap();
-        }
-
-        Ok(())
+        broadcast(Arc::clone(&self.pools), message)
     }
 }
 
 #[derive(Clone, Debug)]
 pub enum SendMessage {
     Pong,
+    Ping,
     World,
     NewBlock(usize),
+    Peer(String),
 }
+
+use super::SendMessage::*;
 
 #[derive(Clone, Debug)]
 pub enum RecvMessage {
     Ping,
     Hello,
+    NewBlock(usize),
+    Peer(String),
 }
+
+use super::RecvMessage::*;
 
 pub struct Connection {
     // Perhaps add id field?
@@ -117,7 +111,7 @@ impl Connection {
     // Pool must provide recv end of channel for sending
     pub fn new
         ( address: &str, 
-          sender: mpsc::Sender<RecvMessage>,
+          conn_pool: ConnectionPool,
         ) -> Result<Connection, PoolError> {
         let socket_addr = address.parse().unwrap();
         let stream = match TcpStream::connect(socket_addr) {
@@ -146,22 +140,21 @@ impl Connection {
         recv_stream.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
         let recv_thread = thread::spawn(move || {
             while !read_done.load(std::sync::atomic::Ordering::Relaxed) {
+                // Implement:
                 // Message handling
+                // Deserialize the recv message
                 let mut buffer = [0; 512];
                 if let Ok(_) = recv_stream.read(&mut buffer) {
                     let ping = b"Ping";
                     if buffer.starts_with(ping) {
                         println!("Got ping");
-                        sender.send(RecvMessage::Ping).unwrap();
-                        recv_stream.write(b"Pong\n").unwrap();
-                        recv_stream.flush().unwrap();
+                        broadcast(Arc::clone(&conn_pool), Pong).unwrap();
                     }
                 };
             }
         });
 
         Ok(Connection {
-            // Need these to handle drop
             socket_addr,
             send_thread: Some(send_thread),
             recv_thread: Some(recv_thread),
@@ -169,4 +162,18 @@ impl Connection {
             done,
         })
     }
+}
+
+// Implementd drop for `Connection`
+
+fn broadcast(pools: Arc<Mutex<Vec<Connection>>>, message: SendMessage) -> Result<(), PoolError> {
+    if pools.lock().unwrap().len() <= 0 {
+        return Err(PoolError::NoPool)
+    }
+
+    for conn in pools.lock().unwrap().iter() {
+        conn.conn_sender.send(message.clone()).unwrap();
+    }
+
+    Ok(())
 }
