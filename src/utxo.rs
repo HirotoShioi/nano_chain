@@ -54,7 +54,7 @@ impl UTXO {
 
     fn validate_transaction(&self, transaction: &Transaction) -> Result<(), TransactionError> {
 
-        if transaction.inputs.len() <= 0 {
+        if transaction.inputs.is_empty() {
             return Err(EmptyInput(transaction.id))
         }
         
@@ -63,14 +63,14 @@ impl UTXO {
             match self.store.get(input) {
                 //Check that inputs are valid
                 None => return Err(InputNotFound(transaction.id)),
-                Some(output) => input_sum = input_sum + output.value.0,
+                Some(output) => input_sum += output.value.0,
             }
         }
 
         let mut output_sum = 0;
 
         for output in transaction.outputs.iter() {
-            output_sum += output_sum + output.value.0;
+            output_sum += output.value.0;
         }
 
         //Calculate the sum
@@ -84,7 +84,7 @@ impl UTXO {
     fn process_transaction(&mut self, transaction: Transaction) -> Result<(), TransactionError> {
         //Process inputs
         for input in transaction.inputs.iter() {
-            if let None = self.store.remove(&input) {
+            if self.store.remove(&input).is_none() {
                 return Err(InputNotFound(transaction.id))
             };
         }

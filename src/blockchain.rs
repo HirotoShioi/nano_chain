@@ -4,11 +4,9 @@ use std::iter;
 use serde::{Deserialize, Serialize};
 use hex;
 
-type ByteString = String; // Might use..?
 type Index = u32;
 type Hash = String;
 type Timestamp = u64;
-type BlockData = ByteString;
 
 #[derive(Debug)]
 pub struct BlockChain {
@@ -35,10 +33,10 @@ impl BlockChain {
         }
     }
 
-    pub fn mint_block(&mut self, block_data: &str) {
+    pub fn mint_block(&mut self, block_data: &[u8]) {
         let previous_block = self.blocks.last().unwrap();
         let difficulty = calculate_difficulty(&previous_block);
-        let new_block = generate_next_block(previous_block, &difficulty, &now(), &block_data.to_string());
+        let new_block = generate_next_block(previous_block, difficulty, now(), block_data);
 
         self.blocks.push(new_block);
     }
@@ -68,7 +66,7 @@ pub struct Block {
     previous_hash : Hash,
     timestamp : Timestamp,
     #[serde(rename = "bdata")]
-    block_data : BlockData,
+    block_data : Vec<u8>,
     nonce : u64,
     difficulty : usize,
     #[serde(rename = "bhash")]
@@ -80,16 +78,16 @@ impl Block {
         ( index: Index
         , previous_hash: Hash
         , timestamp: Timestamp
-        , block_data: BlockData
+        , block_data: &[u8]
         , difficulty: usize
         , nonce: u64
         ) -> Block {
-        let hash = calculate_hash_hex(&index, &previous_hash, &timestamp, &block_data, &nonce);
+        let hash = calculate_hash_hex(index, &previous_hash, timestamp, &block_data, nonce);
         Block {
             index,
             previous_hash,
             timestamp,
-            block_data,
+            block_data: block_data.to_vec(),
             nonce,
             difficulty,
             hash
@@ -97,11 +95,11 @@ impl Block {
     }
 
     pub fn get_hash(&self) -> Hash {
-        calculate_hash_hex(&self.index,
-                              &self.previous_hash,
-                              &self.timestamp,
-                              &self.block_data,
-                              &self.nonce)
+        calculate_hash_hex(self.index,
+                           &self.previous_hash,
+                           self.timestamp,
+                           &self.block_data,
+                           self.nonce)
     }
 }
 
@@ -111,13 +109,13 @@ pub fn genesis_block() -> Block {
     let timestamp = 0;
     let nonce = 0;
     let difficulty = 0;
-    let block_data = String::from("<<Genesis block data>>");
-    let hash = calculate_hash_hex(&index, &previous_hash, &timestamp, &block_data, &nonce);
+    let block_data = b"<<Genesis block data>>";
+    let hash = calculate_hash_hex(index, &previous_hash, timestamp, block_data, nonce);
     Block {
         index,
         previous_hash,
         timestamp,
-        block_data,
+        block_data: block_data.to_vec(),
         nonce,
         difficulty,
         hash,
@@ -125,25 +123,25 @@ pub fn genesis_block() -> Block {
 }
 
 fn calculate_hash_hex
-    ( index: &Index
-    , previous_hash: &Hash
-    , timestamp: &Timestamp
-    , blockdata: &BlockData
-    , nonce: &u64
+    ( index: Index
+    , previous_hash: &str
+    , timestamp: Timestamp
+    , blockdata: &[u8]
+    , nonce: u64
     ) -> Hash
 {
     let concat_bytes = 
         [ index.to_string().into_bytes(),
           previous_hash.to_string().into_bytes(),
           timestamp.to_string().into_bytes(),
-          blockdata.to_string().into_bytes(),
+          blockdata.to_vec(),
           nonce.to_string().into_bytes(),
         ].concat();
 
     hash_hex(&concat_bytes)
 }
 
-fn hash_hex(bytes: &Vec<u8>) -> Hash {
+fn hash_hex(bytes: &[u8]) -> Hash {
     let mut hasher = Sha3_256::new();
     hasher.input(bytes);
     hex::encode(&hasher.result()[..])
@@ -158,52 +156,52 @@ fn now() -> u64 {
 
 fn generate_next_block
     ( previous_block : &Block
-    , difficulty: &usize
-    , timestamp: &Timestamp
-    , block_data: &BlockData) -> Block
+    , difficulty: usize
+    , timestamp: Timestamp
+    , block_data: &[u8]) -> Block
 {
     let index = previous_block.index + 1;
     let previous_hash = &previous_block.hash;
-    let nonce = proof_of_work(&index, &difficulty, &previous_hash, timestamp, block_data);
+    let nonce = proof_of_work(index, difficulty, &previous_hash, timestamp, block_data);
 
     Block::new
-        (index.clone(),
-        previous_hash.clone(),
-        timestamp.clone(),
-        block_data.clone(),
-        difficulty.clone(),
+        (index,
+        previous_hash.to_string(),
+        timestamp,
+        block_data,
+        difficulty,
         nonce,
         )
 }
 
 fn proof_of_work
-    ( index: &Index
-    , difficulty: &usize
-    , previous_hash: &Hash
-    , timestamp: &Timestamp
-    , blockdata: &BlockData) -> u64
+    ( index: Index
+    , difficulty: usize
+    , previous_hash: &str
+    , timestamp: Timestamp
+    , blockdata: &[u8]) -> u64
 {   let mut nonce = 0;
 
-    while !is_work_proven(difficulty, index, previous_hash, timestamp, blockdata, &nonce) {
-        nonce = nonce + 1;
+    while !is_work_proven(difficulty, index, previous_hash, timestamp, blockdata, nonce) {
+        nonce += 1;
     }
 
     nonce
 }
 
 fn is_work_proven
-    ( difficulty: &usize,
-      index: &Index,
-      previous_hash: &Hash,
-      timestamp: &Timestamp,
-      blockdata: &BlockData,
-      nonce: &u64
+    ( difficulty: usize,
+      index: Index,
+      previous_hash: &str,
+      timestamp: Timestamp,
+      blockdata: &[u8],
+      nonce: u64
     ) -> bool 
 {   
-    let prefix: String = iter::repeat('0').take(*difficulty).collect();
-    let hash = calculate_hash_hex(&index, previous_hash, timestamp, blockdata, nonce);
+    let prefix: String = iter::repeat('0').take(difficulty).collect();
+    let hash = calculate_hash_hex(index, previous_hash, timestamp, blockdata, nonce);
 
-    let hash_prefix = hash.get(0..*difficulty)
+    let hash_prefix = hash.get(0..difficulty)
         .expect("Error when encoding hash");
 
     prefix == hash_prefix
@@ -212,23 +210,23 @@ fn is_work_proven
 fn is_valid_block(previous_block: &Block, new_block: &Block) -> Result<(), BlockChainError> {
     
     let work_invalid = !is_work_proven
-        (&new_block.difficulty,
-        &new_block.index,
+        (new_block.difficulty,
+        new_block.index,
         &new_block.previous_hash,
-        &new_block.timestamp,
+        new_block.timestamp,
         &new_block.block_data,
-        &new_block.nonce);
+        new_block.nonce);
 
     if previous_block.index + 1 != new_block.index {
-        return Err(InvalidIndex)
+        Err(InvalidIndex)
     } else if previous_block.hash != new_block.previous_hash {
-        return Err(InvalidPreviousHash(new_block.previous_hash.clone()))
+        Err(InvalidPreviousHash(new_block.previous_hash.clone()))
     } else if new_block.get_hash() != new_block.hash {
-        return Err(InvalidHash(new_block.hash.clone()))
+        Err(InvalidHash(new_block.hash.clone()))
     } else if work_invalid{
-        return Err(WorkNotProven)
+        Err(WorkNotProven)
     } else {
-        return Ok(())
+        Ok(())
     }
 }
 
@@ -236,9 +234,9 @@ fn is_valid_chain(blockchain: &BlockChain) -> Result<(), BlockChainError> {
     let chain_len = blockchain.blocks.len();
 
     if chain_len == 0 {
-        return Err(EmptyChain)
+        Err(EmptyChain)
     } else if chain_len == 1 {
-        return Ok(())
+        Ok(())
     } else {
         let b0 = &blockchain.blocks[0];
         let b1 = &blockchain.blocks[1];

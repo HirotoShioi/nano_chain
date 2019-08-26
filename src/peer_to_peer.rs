@@ -2,25 +2,16 @@ use std::net::{TcpStream, SocketAddr};
 use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
 use std::thread::{self, JoinHandle};
-use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
+use std::sync::{mpsc, Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
 
-type ConnectionPool = Arc<Mutex<HashMap<SocketAddr,Connection>>>;
+//Connection pool handling messages between peers
+type ConnectionPool = Arc<Mutex<HashMap<SocketAddr, Connection>>>;
 
 pub struct ConnectionManager {
-    //Connection pool handling messages between peers
-    pools: ConnectionPool,
-    started: bool,
-}
-
-impl Drop for ConnectionManager {
-    fn drop(&mut self) {
-        for conn in self.pools.lock().unwrap().values_mut() {
-            drop(conn);
-        }
-    }
+    pools: ConnectionPool
 }
 
 #[derive(Debug)]
@@ -44,7 +35,6 @@ impl ConnectionManager {
 
         ConnectionManager {
             pools,
-            started: true,
         }
     }
 
@@ -119,7 +109,7 @@ impl Connection {
                 let message = conn_receiver.recv()
                     .expect("Unable to receive message");
                 //If write fails due to broken pipe, close the threads
-                if let Err(_) = send_stream.write(format!("{:?}\n", &message).as_bytes()) {
+                if send_stream.write(format!("{:?}\n", &message).as_bytes()).is_err() {
                     send_done.store(true, Ordering::Relaxed);
                 };
                 send_stream.flush()
@@ -136,11 +126,11 @@ impl Connection {
                 // Implement:
                 // Message handling
                 // Deserialize the recv message
-                let mut buffer = [0; 512];
-                if let Ok(_) = recv_stream.read(&mut buffer) {
+                let mut buffer = [0u8; 512];
+                if let Ok(size) = recv_stream.read(&mut buffer) {
                     let ping = b"Ping";
+                    println!("Got message: {}", String::from_utf8_lossy(&buffer[0..size]).trim());
                     if buffer.starts_with(ping) {
-                        println!("Got ping");
                         broadcast(Arc::clone(&conn_pool), Pong)
                             .expect("Unable to perform broadcast");
                     }
@@ -177,9 +167,8 @@ impl Drop for Connection {
 fn broadcast(pools: ConnectionPool, message: SendMessage) -> Result<(), PoolError> {
     let mut failed_addr = Vec::new();
     for (socket_addr, conn) in pools.lock().unwrap().iter_mut() {
-        if let Err(_) = conn.conn_sender.send(message.clone()) {
+        if conn.conn_sender.send(message.clone()).is_err() {
             failed_addr.push(socket_addr.clone());
-            drop(conn);
         };
     }
 
