@@ -4,11 +4,10 @@ use std::thread::{self, JoinHandle};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::collections::HashMap;
 
 pub struct ConnectionPool {
     //Connection pool handling messages between peers
-    pools: Arc<Mutex<HashMap<String, Connection>>>,
+    pools: Arc<Mutex<Vec<Connection>>>,
     //Copy of broadcast send end, when spawning new connections, pass this
     sender: mpsc::Sender<RecvMessage>,
     receiver: mpsc::Receiver<RecvMessage>,
@@ -17,11 +16,11 @@ pub struct ConnectionPool {
 
 impl Drop for ConnectionPool {
     fn drop(&mut self) {
-        for conn in self.pools.lock().unwrap().values_mut() {
+        for conn in self.pools.lock().unwrap().iter() {
             conn.done.store(true, Ordering::Relaxed);
         }
 
-        for conn in self.pools.lock().unwrap().values_mut() {
+        for conn in self.pools.lock().unwrap().iter_mut() {
             if let Some(thread) = conn.send_thread.take() {
                 thread.join().unwrap();
             };
@@ -44,13 +43,13 @@ use super::PoolError::*;
 
 impl ConnectionPool {
     pub fn new(addrs: Vec<&str>) -> ConnectionPool {
-        let mut pools = HashMap::new();
+        let mut pools = Vec::new();
         let (sender, receiver) = mpsc::channel();
 
         for address in addrs.iter() {
             let conn_sender = sender.clone();
             if let Ok(conn) = Connection::new(address, conn_sender) {
-                pools.insert(address.to_string(), conn);
+                pools.push(conn);
             }
         }
 
@@ -66,10 +65,12 @@ impl ConnectionPool {
 
         let conn = Connection::new(address, self.sender.clone())?;
 
-        self.pools.lock().unwrap().insert(address.to_string(), conn);
+        self.pools.lock().unwrap().push(conn);
 
         Ok(())
     }
+
+    //start function
 
     pub fn broadcast(&self, message: SendMessage) -> Result<(), PoolError>{
         
@@ -77,7 +78,7 @@ impl ConnectionPool {
             return Err(PoolError::NoPool)
         }
 
-        for conn in self.pools.lock().unwrap().values() {
+        for conn in self.pools.lock().unwrap().iter() {
             conn.conn_sender.send(message.clone()).unwrap();
         }
 
