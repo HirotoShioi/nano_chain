@@ -1,5 +1,6 @@
 use std::net::{TcpStream, SocketAddr};
 use std::io::prelude::*;
+use std::io::{Error, ErrorKind};
 use std::thread::{self, JoinHandle};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
@@ -21,11 +22,11 @@ impl Drop for ConnectionManager {
 
         for conn in self.pools.lock().unwrap().iter_mut() {
             if let Some(thread) = conn.send_thread.take() {
-                thread.join().unwrap();
+                thread.join().expect("Unable to close thread");
             };
 
             if let Some(thread) = conn.recv_thread.take() {
-                thread.join().unwrap();
+                thread.join().expect("Unable to close thread");
             };            
         }
     }
@@ -60,9 +61,9 @@ impl ConnectionManager {
 
     pub fn add(&mut self, address: &str) -> Result<(), PoolError> {
         let conn_pool = Arc::clone(&self.pools);
-        let conn = Connection::new(address, conn_pool)?;
-
-        self.pools.lock().unwrap().push(conn);
+        if let Ok(conn) = Connection::new(address, conn_pool){
+            self.pools.lock().unwrap().push(conn);
+        };
 
         Ok(())
     }
@@ -112,12 +113,12 @@ impl Connection {
     pub fn new
         ( address: &str, 
           conn_pool: ConnectionPool,
-        ) -> Result<Connection, PoolError> {
-        let socket_addr = address.parse().unwrap();
-        let stream = match TcpStream::connect(socket_addr) {
-            Err(_) => return Err(UnableToConnect),
-            Ok(stream) => stream,
+        ) -> std::io::Result<Connection> {
+        let socket_addr = match address.parse(){
+            Ok(socket) => socket,
+            Err(_) => return Err(Error::new(ErrorKind::Other, "Invalid address")),
         };
+        let stream = TcpStream::connect(socket_addr)?;
     
         let (conn_sender, conn_receiver) = mpsc::channel();
 
@@ -125,19 +126,22 @@ impl Connection {
 
         //Handles sending messages
         let send_done = Arc::clone(&done);
-        let mut send_stream = stream.try_clone().unwrap();
+        let mut send_stream = stream.try_clone()?;
         let send_thread = thread::spawn(move || {
             while !send_done.load(std::sync::atomic::Ordering::Relaxed) {
-                let message = conn_receiver.recv().unwrap();
-                send_stream.write(format!("{:?}\n", &message).as_bytes()).unwrap();
-                send_stream.flush().unwrap();
+                let message = conn_receiver.recv()
+                    .expect("Unable to receive message");
+                send_stream.write(format!("{:?}\n", &message).as_bytes())
+                    .expect("Unable to write message");
+                send_stream.flush()
+                    .expect("Unable to flush stream");
             }      
         });
 
         //Handles incoming message
         let read_done = Arc::clone(&done);
-        let mut recv_stream = stream.try_clone().unwrap();
-        recv_stream.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+        let mut recv_stream = stream.try_clone()?;
+        recv_stream.set_read_timeout(Some(Duration::from_millis(200)))?;
         let recv_thread = thread::spawn(move || {
             while !read_done.load(std::sync::atomic::Ordering::Relaxed) {
                 // Implement:
@@ -148,7 +152,8 @@ impl Connection {
                     let ping = b"Ping";
                     if buffer.starts_with(ping) {
                         println!("Got ping");
-                        broadcast(Arc::clone(&conn_pool), Pong).unwrap();
+                        broadcast(Arc::clone(&conn_pool), Pong)
+                            .expect("Unable to perform broadcast");
                     }
                 };
             }
@@ -165,15 +170,27 @@ impl Connection {
 }
 
 // Implementd drop for `Connection`
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.send_thread.take() {
+            thread.join()
+                .expect("Unable to close thread");
+        }
+
+        if let Some(thread) = self.recv_thread.take() {
+            thread.join()
+                .expect("Unable to close thread");
+        }
+    }
+}
 
 fn broadcast(pools: Arc<Mutex<Vec<Connection>>>, message: SendMessage) -> Result<(), PoolError> {
-    if pools.lock().unwrap().len() <= 0 {
-        return Err(PoolError::NoPool)
-    }
-
     for conn in pools.lock().unwrap().iter() {
-        conn.conn_sender.send(message.clone()).unwrap();
+        if let Err(_) = conn.conn_sender.send(message.clone()) {
+            //pools.lock().unwrap().remove_item(&conn);
+            drop(conn);
+        };
     }
-
     Ok(())
 }

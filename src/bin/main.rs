@@ -7,7 +7,7 @@ extern crate serde;
 use std::time::Duration;
 use std::thread;
 
-use nano_chain::{BlockChain, ConnectionPool, SendMessage};
+use nano_chain::{BlockChain, ConnectionManager, SendMessage};
 
 fn main() {
     // let mut block = BlockChain::new();
@@ -20,7 +20,7 @@ fn main() {
     // assert!(block.is_valid_chain().is_ok());
     // println!("{:#?}", block);
 
-    let pool = ConnectionPool::new(vec![
+    let pool = ConnectionManager::new(vec![
         // "192.168.0.1:7888",
         "127.0.0.1:7878",
         "127.0.0.1:8080"
