@@ -40,14 +40,11 @@ impl ConnectionManager {
         }
         
         //start server here
-       let server_pool = Arc::clone(&pools);
-       let handle = thread::spawn(move || {
-            start_listener(server_pool).unwrap(); 
-        });
+       let server_handle = start_listener(Arc::clone(&pools)).unwrap();
 
         ConnectionManager {
             pools,
-            handle: Some(handle),
+            handle: Some(server_handle),
         }
     }
 
@@ -198,18 +195,20 @@ fn broadcast(pools: ConnectionPool, message: SendMessage) -> Result<(), PoolErro
     Ok(())
 }
 
-fn start_listener(pools: ConnectionPool) -> std::io::Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:1234")?;
-    // accept connections and process them serially
-    for stream in listener.incoming() {
-        let conn_pools = Arc::clone(&pools); // Used to instansiate Connection
-        let pool_dict = Arc::clone(&pools); // Used to insert new Connection to the pool
-        thread::spawn(move || {
-            let stream = stream.unwrap();
-            let peer_addr = stream.peer_addr().unwrap();
-            let conn = Connection::new(stream, conn_pools).unwrap();
-            pool_dict.lock().unwrap().insert(peer_addr, conn);
-        });
-    }
-    Ok(())
+fn start_listener(pools: ConnectionPool) -> std::io::Result<JoinHandle<()>> {
+    let handle = thread::spawn(move || {
+        let listener = TcpListener::bind("127.0.0.1:1234").unwrap();
+        // accept connections and process them
+        for stream in listener.incoming() {
+            let conn_pools = Arc::clone(&pools); // Used to instansiate Connection
+            let pool_dict = Arc::clone(&pools); // Used to insert new Connection to the pool
+            thread::spawn(move || {
+                let stream = stream.unwrap();
+                let peer_addr = stream.peer_addr().unwrap();
+                let conn = Connection::new(stream, conn_pools).unwrap();
+                pool_dict.lock().unwrap().insert(peer_addr, conn);
+            });
+        } 
+    });
+    Ok(handle)
 }
