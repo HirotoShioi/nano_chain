@@ -52,7 +52,7 @@ impl UTXO {
         Ok(())
     }
 
-    fn validate_transaction(&self, transaction: &Transaction) -> Result<(), TransactionError> {
+    pub fn validate_transaction(&self, transaction: &Transaction) -> Result<(), TransactionError> {
 
         if transaction.inputs.is_empty() {
             return Err(EmptyInput(transaction.id))
