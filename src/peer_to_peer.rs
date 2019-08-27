@@ -1,4 +1,4 @@
-use std::net::{TcpStream, SocketAddr};
+use std::net::{TcpStream, SocketAddr, TcpListener};
 use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
 use std::thread::{self, JoinHandle};
@@ -11,9 +11,17 @@ use std::collections::HashMap;
 type ConnectionPool = Arc<Mutex<HashMap<SocketAddr, Connection>>>;
 
 pub struct ConnectionManager {
-    pools: ConnectionPool
+    pools: ConnectionPool,
+    handle: Option<JoinHandle<()>>,
 }
 
+impl Drop for ConnectionManager {
+    fn drop(&mut self) {
+        if let Some(thread) = self.handle.take() {
+            thread.join().unwrap();
+        }
+    }
+}
 #[derive(Debug)]
 pub enum PoolError {
     NoPool,
@@ -26,21 +34,26 @@ impl ConnectionManager {
         let pools = Arc::new(Mutex::new(HashMap::new()));
         for address in addrs.iter() {
             let conn_pool = Arc::clone(&pools);
-            if let Ok((socket_addr, conn)) = Connection::new(address, conn_pool) {
+            if let Ok((socket_addr, conn)) = Connection::from_addr(address, conn_pool) {
                 pools.lock().unwrap().insert(socket_addr, conn);
             }
         }
         
         //start server here
+       let server_pool = Arc::clone(&pools);
+       let handle = thread::spawn(move || {
+            start_listener(server_pool).unwrap(); 
+        });
 
         ConnectionManager {
             pools,
+            handle: Some(handle),
         }
     }
 
     pub fn add(&mut self, address: &str) -> Result<(), PoolError> {
         let conn_pool = Arc::clone(&self.pools);
-        if let Ok((socket_addr, conn)) = Connection::new(address, conn_pool){
+        if let Ok((socket_addr, conn)) = Connection::from_addr(address, conn_pool){
             self.pools.lock().unwrap().insert(socket_addr, conn);
         };
 
@@ -85,7 +98,7 @@ pub struct Connection {
 
 impl Connection {
     // Pool must provide recv end of channel for sending
-    pub fn new
+    pub fn from_addr
         ( address: &str, 
           conn_pool: ConnectionPool,
         ) -> std::io::Result<(SocketAddr, Connection)> {
@@ -94,7 +107,11 @@ impl Connection {
             Err(_) => return Err(Error::new(ErrorKind::Other, "Invalid address")),
         };
         let stream = TcpStream::connect(socket_addr)?;
-    
+        let conn = Connection::new(stream, conn_pool)?;
+        Ok((socket_addr, conn))
+    }
+
+    pub fn new(stream: TcpStream, conn_pool: ConnectionPool) -> std::io::Result<Connection> {
         let (conn_sender, conn_receiver) = mpsc::channel();
 
         let done = Arc::new(AtomicBool::new(false));
@@ -102,6 +119,7 @@ impl Connection {
         //Handles sending messages
         let send_done = Arc::clone(&done);
         let mut send_stream = stream.try_clone()?;
+
         let send_thread = thread::spawn(move || {
             while !send_done.load(Ordering::Relaxed) {
                 // Can you make it such that if any of the function fails,
@@ -127,14 +145,14 @@ impl Connection {
                 // Message handling
                 // Deserialize the recv message
                 let mut buffer = [0u8; 512];
-                if let Ok(size) = recv_stream.read(&mut buffer) {
+                if let Ok(_) = recv_stream.read(&mut buffer) {
                     let ping = b"Ping";
-                    println!("Got message: {}", String::from_utf8_lossy(&buffer[0..size]).trim());
                     if buffer.starts_with(ping) {
                         broadcast(Arc::clone(&conn_pool), Pong)
                             .expect("Unable to perform broadcast");
                     }
                 };
+                recv_stream.flush().expect("Unable to flush"); //?
             }
         });
         
@@ -144,7 +162,8 @@ impl Connection {
             conn_sender,
             done,
         };
-        Ok((socket_addr, conn))
+
+        Ok(conn)
     }
 }
 
@@ -176,5 +195,21 @@ fn broadcast(pools: ConnectionPool, message: SendMessage) -> Result<(), PoolErro
         pools.lock().unwrap().remove(socket_addr);
     }
 
+    Ok(())
+}
+
+fn start_listener(pools: ConnectionPool) -> std::io::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:1234")?;
+    // accept connections and process them serially
+    for stream in listener.incoming() {
+        let conn_pools = Arc::clone(&pools); // Used to instansiate Connection
+        let pool_dict = Arc::clone(&pools); // Used to insert new Connection to the pool
+        thread::spawn(move || {
+            let stream = stream.unwrap();
+            let peer_addr = stream.peer_addr().unwrap();
+            let conn = Connection::new(stream, conn_pools).unwrap();
+            pool_dict.lock().unwrap().insert(peer_addr, conn);
+        });
+    }
     Ok(())
 }

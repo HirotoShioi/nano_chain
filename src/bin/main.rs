@@ -10,15 +10,15 @@ use std::thread;
 use nano_chain::{BlockChain, ConnectionManager, SendMessage};
 
 fn main() {
-    let mut block = BlockChain::new();
-    block.mint_block(b"hello_world");
-    block.mint_block(b"I'm from canada");
-    block.mint_block(b"New block chain");
-    block.mint_block(b"Mexico");
-    block.mint_block(b"generator");
+    // let mut block = BlockChain::new();
+    // block.mint_block(b"hello_world");
+    // block.mint_block(b"I'm from canada");
+    // block.mint_block(b"New block chain");
+    // block.mint_block(b"Mexico");
+    // block.mint_block(b"generator");
 
-    assert!(block.is_valid_chain().is_ok());
-    println!("{:#?}", block);
+    // assert!(block.is_valid_chain().is_ok());
+    // println!("{:#?}", block);
 
     let pool = ConnectionManager::new(vec![
         // "192.168.0.1:7888",
