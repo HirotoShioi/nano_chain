@@ -1,7 +1,7 @@
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::error;
-use std::net::{TcpStream, SocketAddr, TcpListener};
+use std::net::{TcpStream, SocketAddr, TcpListener, ToSocketAddrs};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::sync::{mpsc, Arc, Mutex};
@@ -46,7 +46,9 @@ impl ConnectionManager {
     /// 
     /// You can provide vector of addresses which can be used to connect to the other
     /// nodes initially as well as launching server by providin `server_address`
-    pub fn new(addrs: Vec<&str>, server_address: Option<&'static str>) -> ConnectionManager {
+    pub fn new <T:'static + ToSocketAddrs, U: 'static + ToSocketAddrs + Send + Sync>
+    (addrs: Vec<T>, server_address: Option<U>) -> ConnectionManager
+    {
         let pools = Arc::new(Mutex::new(HashMap::new()));
         for address in addrs.iter() {
             let conn_pool = Arc::clone(&pools);
@@ -121,17 +123,16 @@ impl Connection {
     /// Create TCPStream with given SocketAddr
     ///If connection is successful, instantiate `Connection` and insert it into
     ///given `ConnectionPool`
-    fn from_addr
-        ( address: &str, 
+    fn from_addr<T: ToSocketAddrs>
+        ( address: T, 
           conn_pool: ConnectionPool,
         ) -> PeerResult<()> {
-        let socket_addr: SocketAddr = address.parse()?;
-        let stream = TcpStream::connect(socket_addr)?;
-        Connection::new(stream, Arc::clone(&conn_pool))
+        let stream = TcpStream::connect(address)?;
+        Connection::connect(stream, Arc::clone(&conn_pool))
     }
 
     ///Instantiate `Connection` and insert it into `ConnectionPool`
-    fn new(stream: TcpStream, conn_pool: ConnectionPool) -> PeerResult<()> {
+    fn connect(stream: TcpStream, conn_pool: ConnectionPool) -> PeerResult<()> {
         //Check if address aleady exists in the pool
         let (conn_sender, conn_receiver) = mpsc::channel();
         let done = Arc::new(AtomicBool::new(false));
@@ -216,16 +217,16 @@ fn broadcast(pools: ConnectionPool, message: SendMessage) -> PeerResult<()> {
 }
 
 ///Start the network server by binding to given address
-fn start_listener(
+fn start_listener<T:'static + ToSocketAddrs + Sync + Send>(
     pools: ConnectionPool,
-    address: &'static str) -> std::io::Result<JoinHandle<()>> {
+    address: T) -> std::io::Result<JoinHandle<()>> {
     let handle = thread::spawn(move || {
         let listener = TcpListener::bind(address).unwrap();
         // accept connections and process them
         for stream in listener.incoming() {
             let conn_pools = Arc::clone(&pools);
             thread::spawn(move || {
-                Connection::new(stream.unwrap(), conn_pools).unwrap();
+                Connection::connect(stream.unwrap(), conn_pools).unwrap();
             });
         } 
     });
@@ -236,7 +237,7 @@ fn start_listener(
 fn handle_recv_message(stream: &TcpStream, pool: ConnectionPool) -> PeerResult<()>{
     let mut reader = BufReader::new(stream);
     let mut buffer = String::new();
-    if let Ok(_) = reader.read_line(&mut buffer) {
+    if reader.read_line(&mut buffer).is_ok() {
         let recv_message: RecvMessage = serde_json::from_str(&buffer)?;
         println!("Got message: {:?}", recv_message);
         match recv_message {
@@ -255,7 +256,7 @@ fn handle_recv_message(stream: &TcpStream, pool: ConnectionPool) -> PeerResult<(
 fn send_message(stream: &TcpStream, send_message: SendMessage) -> PeerResult<()>{
     let mut stream_clone = stream.try_clone()?;
     serde_json::to_writer(stream, &send_message)?;
-    stream_clone.write(b"\n")?;
+    stream_clone.write_all(b"\n")?;
     stream_clone.flush()?;
     Ok(())
 }
