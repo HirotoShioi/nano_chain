@@ -11,11 +11,7 @@ use nano_chain::{BlockChain, ConnectionManager, SendMessage};
 
 fn main() {
 
-    let pool = ConnectionManager::new(vec![
-        // "192.168.0.1:7888",
-        "127.0.0.1:7878",
-        "127.0.0.1:8080"
-    ], Some("127.0.0.1:8000"));
+    let pool = ConnectionManager::new(vec!["127.0.0.1:8080"], Some("127.0.0.1:8000"));
 
     let mut num = 0;
 

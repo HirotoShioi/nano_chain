@@ -1,15 +1,21 @@
-use std::net::{TcpStream, SocketAddr, TcpListener};
 use std::io::prelude::*;
-use std::io::{Error, ErrorKind};
+use std::io::BufReader;
+use std::error;
+use std::net::{TcpStream, SocketAddr, TcpListener};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::sync::{mpsc, Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use serde_json;
 
 ///Connection pool handling messages between peers
 ///TODO: Should make interface such that it limits the number of connection
+//Bug: Inserting existing address to the pool will cause main thread to block indefinately
 type ConnectionPool = Arc<Mutex<HashMap<SocketAddr, Connection>>>;
+
+type PeerResult<T> = Result<T, Box<dyn error::Error>>;
 
 ///Connection manager is responsible of managing listener.
 ///It also should provide interface that other modules can use
@@ -70,29 +76,29 @@ impl ConnectionManager {
     }
 
     /// Broadcast `SendMessage` to the known peer
-    pub fn broadcast(&self, message: SendMessage) -> Result<(), PoolError>{
+    pub fn broadcast(&self, message: SendMessage) -> PeerResult<()>{
         broadcast(Arc::clone(&self.pools), message)
     }
 
 }
 
 ///Set of messages that can be sent
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum SendMessage {
     Pong,
     Ping,
-    World,
     NewBlock(usize),
     Peer(String),
+    AskPeer,
 }
 
 use super::SendMessage::*;
 
 ///Set of message that can be received within the network
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum RecvMessage {
     Ping,
-    Hello,
+    Pong,
     NewBlock(usize),
     Peer(String),
 }
@@ -118,24 +124,22 @@ impl Connection {
     fn from_addr
         ( address: &str, 
           conn_pool: ConnectionPool,
-        ) -> std::io::Result<()> {
-        let socket_addr: SocketAddr = match address.parse(){
-            Ok(socket) => socket,
-            Err(_) => return Err(Error::new(ErrorKind::Other, "Invalid address")),
-        };
+        ) -> PeerResult<()> {
+        let socket_addr: SocketAddr = address.parse()?;
         let stream = TcpStream::connect(socket_addr)?;
         Connection::new(stream, Arc::clone(&conn_pool))
     }
 
     ///Instantiate `Connection` and insert it into `ConnectionPool`
-    fn new(stream: TcpStream, conn_pool: ConnectionPool) -> std::io::Result<()> {
+    fn new(stream: TcpStream, conn_pool: ConnectionPool) -> PeerResult<()> {
+        //Check if address aleady exists in the pool
         let (conn_sender, conn_receiver) = mpsc::channel();
         let done = Arc::new(AtomicBool::new(false));
 
         //Handles sending messages
         let send_done = Arc::clone(&done);
         let mut send_stream = stream.try_clone()?;
-        send_stream.write(b"Connection established\n").unwrap();
+        send_message(&send_stream, Ping)?;
         let send_thread = thread::spawn(move || {
             while !send_done.load(Ordering::Relaxed) {
                 // Can you make it such that if any of the function fails,
@@ -143,7 +147,7 @@ impl Connection {
                 let message = conn_receiver.recv()
                     .expect("Unable to receive message");
                 //If write fails due to broken pipe, close the threads
-                if send_stream.write(format!("{:?}\n", &message).as_bytes()).is_err() {
+                if send_message(&send_stream, message).is_err() {
                     send_done.store(true, Ordering::Relaxed);
                 };
                 send_stream.flush()
@@ -158,18 +162,9 @@ impl Connection {
         recv_stream.set_read_timeout(Some(Duration::from_millis(200)))?;
         let recv_thread = thread::spawn(move || {
             while !read_done.load(Ordering::Relaxed) {
-                // Implement:
-                // Message handling
-                // Deserialize the recv message
-                let mut buffer = [0u8; 512];
-                if let Ok(_) = recv_stream.read(&mut buffer) {
-                    let ping = b"Ping";
-                    if buffer.starts_with(ping) {
-                        broadcast(Arc::clone(&conn_pool), Pong)
-                            .expect("Unable to perform broadcast");
-                    }
-                };
-                recv_stream.flush().expect("Unable to flush"); //?
+                if handle_recv_message(&recv_stream, Arc::clone(&conn_pool)).is_ok() {
+                    recv_stream.flush().unwrap();
+                }
             }
         });
         
@@ -181,7 +176,6 @@ impl Connection {
         };
 
         //Store it in the connection pool
-        //Not sure if this is good idea..
         read_pool.lock().unwrap().insert(stream.peer_addr().unwrap(), conn);
 
         Ok(())
@@ -204,7 +198,7 @@ impl Drop for Connection {
 }
 
 /// Broadcast given `message` to the known peers
-fn broadcast(pools: ConnectionPool, message: SendMessage) -> Result<(), PoolError> {
+fn broadcast(pools: ConnectionPool, message: SendMessage) -> PeerResult<()> {
     // If any of the `send` fails, store the `SocketAddr` here so it can later be
     // removed.
     let mut failed_addr = Vec::new();
@@ -236,4 +230,32 @@ fn start_listener(
         } 
     });
     Ok(handle)
+}
+
+///Read messages from the `TcpStream` and handle them accordingly
+fn handle_recv_message(stream: &TcpStream, pool: ConnectionPool) -> PeerResult<()>{
+    let mut reader = BufReader::new(stream);
+    let mut buffer = String::new();
+    if let Ok(_) = reader.read_line(&mut buffer) {
+        let recv_message: RecvMessage = serde_json::from_str(&buffer)?;
+        println!("Got message: {:?}", recv_message);
+        match recv_message {
+            RecvMessage::Ping => send_message(&stream, Pong)?,
+            RecvMessage::Pong => {},
+            RecvMessage::NewBlock(num) => broadcast(Arc::clone(&pool), NewBlock(num))?,
+            RecvMessage::Peer(addr) => { 
+                Connection::from_addr(&addr, Arc::clone(&pool))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+///Send `SendMessage` the given stream
+fn send_message(stream: &TcpStream, send_message: SendMessage) -> PeerResult<()>{
+    let mut stream_clone = stream.try_clone()?;
+    serde_json::to_writer(stream, &send_message)?;
+    stream_clone.write(b"\n")?;
+    stream_clone.flush()?;
+    Ok(())
 }
