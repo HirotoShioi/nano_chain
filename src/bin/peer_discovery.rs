@@ -1,16 +1,10 @@
-extern crate sha3;
-extern crate hex;
-extern crate base64;
-extern crate serde_json;
-extern crate serde;
-
 use std::time::Duration;
 use std::thread;
 
-use nano_chain::{BlockChain, ConnectionManager, SendMessage};
+use nano_chain::{ConnectionManager, SendMessage};
 
 fn main() {
-
+    //Need CLI
     let pool = ConnectionManager::new(vec!["127.0.0.1:8080"], Some("127.0.0.1:8000"));
 
     let mut num = 0;

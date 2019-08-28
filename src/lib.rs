@@ -1,3 +1,9 @@
+extern crate sha3;
+extern crate hex;
+extern crate base64;
+extern crate serde_json;
+extern crate serde;
+
 mod blockchain;
 mod node;
 mod utxo;

@@ -1,7 +1,7 @@
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::error;
-use std::net::{TcpStream, SocketAddr, TcpListener};
+use std::net::{TcpStream, SocketAddr, TcpListener, ToSocketAddrs};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::sync::{mpsc, Arc, Mutex};
@@ -46,13 +46,13 @@ impl ConnectionManager {
     /// 
     /// You can provide vector of addresses which can be used to connect to the other
     /// nodes initially as well as launching server by providin `server_address`
-    pub fn new(addrs: Vec<&str>, server_address: Option<&'static str>) -> ConnectionManager {
+    pub fn new <T:'static + ToSocketAddrs, U: 'static + ToSocketAddrs + Send + Sync>
+    (addrs: T, server_address: Option<U>) -> ConnectionManager
+    {
         let pools = Arc::new(Mutex::new(HashMap::new()));
-        for address in addrs.iter() {
+        for address in addrs.to_socket_addrs().unwrap() {
             let conn_pool = Arc::clone(&pools);
-            if Connection::from_addr(address, conn_pool).is_err() {
-                continue;
-            };
+            let conn = Connection::new(address);
         }
 
         let server_handle = match server_address {
@@ -107,31 +107,43 @@ pub enum RecvMessage {
 ///It will start send and recv thread once instantiated.
 pub struct Connection {
     // Perhaps add id field?
+    address: SocketAddr,
     // Thread handle for send operation
     send_thread: Option<JoinHandle<()>>,
     // Thread handle for receive operation
     recv_thread: Option<JoinHandle<()>>,
     // Used to send message to the peer
-    conn_sender: mpsc::Sender<SendMessage>,
+    conn_sender: Option<mpsc::Sender<SendMessage>>,
     // Used to shutdown connection gracefully
     done: Arc<AtomicBool>,
 }
 
 impl Connection {
+    //`new` will return `Connection` with nothing being initialized
+    fn new(address: SocketAddr) -> Connection {
+        Connection {
+            address,
+            send_thread: None,
+            recv_thread: None,
+            conn_sender: None,
+            done: Arc::new(AtomicBool::new(false)),
+        }
+    }
+    //pass it to the `ConnectionManager` and let the manager handle the initialization
+
     /// Create TCPStream with given SocketAddr
     ///If connection is successful, instantiate `Connection` and insert it into
     ///given `ConnectionPool`
-    fn from_addr
-        ( address: &str, 
+    fn from_addr<T: ToSocketAddrs>
+        ( address: T, 
           conn_pool: ConnectionPool,
         ) -> PeerResult<()> {
-        let socket_addr: SocketAddr = address.parse()?;
-        let stream = TcpStream::connect(socket_addr)?;
-        Connection::new(stream, Arc::clone(&conn_pool))
+        let stream = TcpStream::connect(address)?;
+        Connection::connect(stream, Arc::clone(&conn_pool))
     }
 
     ///Instantiate `Connection` and insert it into `ConnectionPool`
-    fn new(stream: TcpStream, conn_pool: ConnectionPool) -> PeerResult<()> {
+    fn connect(stream: TcpStream, conn_pool: ConnectionPool) -> PeerResult<()> {
         //Check if address aleady exists in the pool
         let (conn_sender, conn_receiver) = mpsc::channel();
         let done = Arc::new(AtomicBool::new(false));
@@ -168,15 +180,19 @@ impl Connection {
             }
         });
         
+        let peer_addr = stream.peer_addr()?;
+
         let conn = Connection {
+            address: peer_addr,
             send_thread: Some(send_thread),
             recv_thread: Some(recv_thread),
-            conn_sender,
+            conn_sender: Some(conn_sender),
             done,
         };
 
         //Store it in the connection pool
-        read_pool.lock().unwrap().insert(stream.peer_addr().unwrap(), conn);
+        //Delete this, let manager take care of it.
+        read_pool.lock().unwrap().insert(peer_addr, conn);
 
         Ok(())
     }
@@ -203,8 +219,10 @@ fn broadcast(pools: ConnectionPool, message: SendMessage) -> PeerResult<()> {
     // removed.
     let mut failed_addr = Vec::new();
     for (socket_addr, conn) in pools.lock().unwrap().iter_mut() {
-        if conn.conn_sender.send(message.clone()).is_err() {
-            failed_addr.push(socket_addr.clone());
+        if let Some(sender) = &conn.conn_sender {
+            if sender.send(message.clone()).is_err() {
+                failed_addr.push(socket_addr.clone());
+            };
         };
     }
 
@@ -216,16 +234,16 @@ fn broadcast(pools: ConnectionPool, message: SendMessage) -> PeerResult<()> {
 }
 
 ///Start the network server by binding to given address
-fn start_listener(
+fn start_listener<T:'static + ToSocketAddrs + Sync + Send>(
     pools: ConnectionPool,
-    address: &'static str) -> std::io::Result<JoinHandle<()>> {
+    address: T) -> std::io::Result<JoinHandle<()>> {
     let handle = thread::spawn(move || {
         let listener = TcpListener::bind(address).unwrap();
         // accept connections and process them
         for stream in listener.incoming() {
             let conn_pools = Arc::clone(&pools);
             thread::spawn(move || {
-                Connection::new(stream.unwrap(), conn_pools).unwrap();
+                Connection::connect(stream.unwrap(), conn_pools).unwrap();
             });
         } 
     });
@@ -236,7 +254,7 @@ fn start_listener(
 fn handle_recv_message(stream: &TcpStream, pool: ConnectionPool) -> PeerResult<()>{
     let mut reader = BufReader::new(stream);
     let mut buffer = String::new();
-    if let Ok(_) = reader.read_line(&mut buffer) {
+    if reader.read_line(&mut buffer).is_ok() {
         let recv_message: RecvMessage = serde_json::from_str(&buffer)?;
         println!("Got message: {:?}", recv_message);
         match recv_message {
@@ -255,7 +273,7 @@ fn handle_recv_message(stream: &TcpStream, pool: ConnectionPool) -> PeerResult<(
 fn send_message(stream: &TcpStream, send_message: SendMessage) -> PeerResult<()>{
     let mut stream_clone = stream.try_clone()?;
     serde_json::to_writer(stream, &send_message)?;
-    stream_clone.write(b"\n")?;
+    stream_clone.write_all(b"\n")?;
     stream_clone.flush()?;
     Ok(())
 }
