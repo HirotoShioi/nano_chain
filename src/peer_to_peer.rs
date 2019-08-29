@@ -22,11 +22,20 @@ type PeerResult<T> = Result<T, Box<dyn error::Error>>;
 pub struct ConnectionManager {
     pools: ConnectionPool,
     server_handle: Option<JoinHandle<()>>,
+    register_done: Arc<AtomicBool>,
+    register_handle: Option<JoinHandle<()>>,
+    addr_sender: mpsc::Sender<Connection>,
 }
 
 impl Drop for ConnectionManager {
     fn drop(&mut self) {
         if let Some(thread) = self.server_handle.take() {
+            thread.join().unwrap();
+        }
+
+        self.register_done.store(true, Ordering::Relaxed);
+
+        if let Some(thread) = self.register_handle.take() {
             thread.join().unwrap();
         }
     }
@@ -39,39 +48,40 @@ pub enum PoolError {
     UnableToConnect,
 }
 
-use super::PoolError::*;
-
 impl ConnectionManager {
     /// Create an instance of `ConnectionManager`
     /// 
     /// You can provide vector of addresses which can be used to connect to the other
     /// nodes initially as well as launching server by providin `server_address`
-    pub fn new <T:'static + ToSocketAddrs, U: 'static + ToSocketAddrs + Send + Sync>
+    pub fn new <T:ToSocketAddrs, U: 'static + ToSocketAddrs + Send + Sync>
     (addrs: T, server_address: Option<U>) -> ConnectionManager
     {
         let pools = Arc::new(Mutex::new(HashMap::new()));
+        let (register_done, register_handle, addr_sender) = start_connection_registerer(Arc::clone(&pools)).unwrap();
+
         for address in addrs.to_socket_addrs().unwrap() {
-            let conn_pool = Arc::clone(&pools);
-            let conn = Connection::new(address);
+            let connection = Connection::new(address);
+            addr_sender.send(connection).unwrap();
         }
 
         let server_handle = match server_address {
-            Some(address) => Some(start_listener(Arc::clone(&pools), address).unwrap()),
+            Some(address) => Some(start_listener(Arc::clone(&pools), addr_sender.clone(), address).unwrap()),
             None => None,
         };
 
         ConnectionManager {
             pools,
             server_handle,
+            register_done,
+            register_handle: Some(register_handle),
+            addr_sender,
         }
     }
 
     /// Add new connection to the pool
     pub fn add(&mut self, address: &str) -> Result<(), PoolError> {
-        let conn_pool = Arc::clone(&self.pools);
-        if Connection::from_addr(address, conn_pool).is_err() {
-            return Err(FailedToCreateConnection)
-        }
+        let conn = Connection::new(address.parse().unwrap());
+        self.addr_sender.send(conn).unwrap();
         Ok(())
     }
 
@@ -134,16 +144,9 @@ impl Connection {
     /// Create TCPStream with given SocketAddr
     ///If connection is successful, instantiate `Connection` and insert it into
     ///given `ConnectionPool`
-    fn from_addr<T: ToSocketAddrs>
-        ( address: T, 
-          conn_pool: ConnectionPool,
-        ) -> PeerResult<()> {
-        let stream = TcpStream::connect(address)?;
-        Connection::connect_stream(stream, Arc::clone(&conn_pool))
-    }
 
     ///Instantiate `Connection` and insert it into `ConnectionPool`
-    fn connect_stream(stream: TcpStream, conn_pool: ConnectionPool) -> PeerResult<()> {
+    fn connect_stream(stream: TcpStream, conn_pool: ConnectionPool, conn_adder: mpsc::Sender<Connection>) -> PeerResult<Connection> {
         //Check if address aleady exists in the pool
         let (conn_sender, conn_receiver) = mpsc::channel();
         let done = Arc::new(AtomicBool::new(false));
@@ -169,12 +172,11 @@ impl Connection {
 
         //Handles incoming message
         let read_done = Arc::clone(&done);
-        let read_pool = Arc::clone(&conn_pool);
         let mut recv_stream = stream.try_clone()?;
         recv_stream.set_read_timeout(Some(Duration::from_millis(200)))?;
         let recv_thread = thread::spawn(move || {
             while !read_done.load(Ordering::Relaxed) {
-                if handle_recv_message(&recv_stream, Arc::clone(&conn_pool)).is_ok() {
+                if handle_recv_message(&recv_stream, Arc::clone(&conn_pool), conn_adder.clone()).is_ok() {
                     recv_stream.flush().unwrap();
                 }
             }
@@ -190,60 +192,12 @@ impl Connection {
             done,
         };
 
-        //Store it in the connection pool
-        //Delete this, let manager take care of it.
-        read_pool.lock().unwrap().insert(peer_addr, conn);
-
-        Ok(())
+        Ok(conn)
     }
 
-    fn connect2(&mut self, conn_pool: ConnectionPool, conn_adder: mpsc::Sender<(SocketAddr, &mut Connection)>) -> PeerResult<Connection> {
+    fn connect(&self, conn_pool: ConnectionPool, conn_adder: mpsc::Sender<Connection>) -> PeerResult<Connection> {
         let stream = TcpStream::connect(&self.address)?;
-        //Check if address aleady exists in the pool
-        let (conn_sender, conn_receiver) = mpsc::channel();
-        let done = Arc::new(AtomicBool::new(false));
-
-        //Handles sending messages
-        let send_done = Arc::clone(&done);
-        let mut send_stream = stream.try_clone()?;
-        send_message(&send_stream, Ping)?;
-        let send_thread = thread::spawn(move || {
-            while !send_done.load(Ordering::Relaxed) {
-                // Can you make it such that if any of the function fails,
-                // it does the same restore action?
-                let message = conn_receiver.recv()
-                    .expect("Unable to receive message");
-                //If write fails due to broken pipe, close the threads
-                if send_message(&send_stream, message).is_err() {
-                    send_done.store(true, Ordering::Relaxed);
-                };
-                send_stream.flush()
-                    .expect("Unable to flush stream");
-            }      
-        });
-
-        //Handles incoming message
-        let read_done = Arc::clone(&done);
-        let mut recv_stream = stream.try_clone()?;
-        recv_stream.set_read_timeout(Some(Duration::from_millis(200)))?;
-        let recv_thread = thread::spawn(move || {
-            while !read_done.load(Ordering::Relaxed) {
-                if handle_recv_message(&recv_stream, Arc::clone(&conn_pool)).is_ok() {
-                    recv_stream.flush().unwrap();
-                }
-            }
-        });
-        
-        let peer_addr = stream.peer_addr()?;
-
-        let conn = Connection {
-            address: peer_addr,
-            send_thread: Some(send_thread),
-            recv_thread: Some(recv_thread),
-            conn_sender: Some(conn_sender),
-            done,
-        };
-
+        let conn = Connection::connect_stream(stream, conn_pool, conn_adder).unwrap();
         Ok(conn)
     }
 }
@@ -286,14 +240,18 @@ fn broadcast(pools: ConnectionPool, message: SendMessage) -> PeerResult<()> {
 ///Start the network server by binding to given address
 fn start_listener<T:'static + ToSocketAddrs + Sync + Send>(
     pools: ConnectionPool,
+    conn_adder: mpsc::Sender<Connection>,
     address: T) -> std::io::Result<JoinHandle<()>> {
     let handle = thread::spawn(move || {
         let listener = TcpListener::bind(address).unwrap();
         // accept connections and process them
         for stream in listener.incoming() {
             let conn_pools = Arc::clone(&pools);
+            let conn_adder_c = conn_adder.clone();
+            let conn_pools_c = Arc::clone(&pools);
             thread::spawn(move || {
-                Connection::connect_stream(stream.unwrap(), conn_pools).unwrap();
+                let conn = Connection::connect_stream(stream.unwrap(), conn_pools, conn_adder_c).unwrap();
+                conn_pools_c.lock().unwrap().insert(conn.address, conn);
             });
         } 
     });
@@ -301,7 +259,7 @@ fn start_listener<T:'static + ToSocketAddrs + Sync + Send>(
 }
 
 ///Read messages from the `TcpStream` and handle them accordingly
-fn handle_recv_message(stream: &TcpStream, pool: ConnectionPool) -> PeerResult<()>{
+fn handle_recv_message(stream: &TcpStream, pool: ConnectionPool, conn_sender: mpsc::Sender<Connection>) -> PeerResult<()>{
     let mut reader = BufReader::new(stream);
     let mut buffer = String::new();
     if reader.read_line(&mut buffer).is_ok() {
@@ -311,8 +269,10 @@ fn handle_recv_message(stream: &TcpStream, pool: ConnectionPool) -> PeerResult<(
             RecvMessage::Ping => send_message(&stream, Pong)?,
             RecvMessage::Pong => {},
             RecvMessage::NewBlock(num) => broadcast(Arc::clone(&pool), NewBlock(num))?,
-            RecvMessage::Peer(addr) => { 
-                Connection::from_addr(&addr, Arc::clone(&pool))?;
+            RecvMessage::Peer(addr) => {
+                let socket_addr = addr.parse().unwrap();
+                let conn = Connection::new(socket_addr);
+                conn_sender.send(conn)?;
             }
         }
     }
@@ -329,17 +289,20 @@ fn send_message(stream: &TcpStream, send_message: SendMessage) -> PeerResult<()>
 }
 
 fn start_connection_registerer(conn_pool: ConnectionPool) 
-    -> PeerResult<(Arc<AtomicBool>, JoinHandle<()>, mpsc::Sender<(SocketAddr, &'static mut Connection)>)> {
-    let (tx, rx) = mpsc::channel::<(SocketAddr, &mut Connection)>();
+    -> PeerResult<(Arc<AtomicBool>, JoinHandle<()>, mpsc::Sender<Connection>)> {
+    let (tx, rx) = mpsc::channel::<Connection>();
     let is_done = Arc::new(AtomicBool::new(false));
     let is_done_c = Arc::clone(&is_done);
     let tx_c = tx.clone();
     let handle = thread::spawn(move || {
         while !is_done_c.load(Ordering::Relaxed) {
-            let (socket_addr, conn) = rx.recv().unwrap();
-            if !conn_pool.lock().unwrap().contains_key(&socket_addr) {
-                let conn = conn.connect2(Arc::clone(&conn_pool), tx.clone()).unwrap();
-                conn_pool.lock().unwrap().insert(socket_addr, conn);
+            let conn = rx.recv().unwrap();
+            let mut conn_pool_locked = conn_pool.lock().unwrap();
+            if !conn_pool_locked.contains_key(&conn.address) {
+                if let Ok(conn) = conn.connect(Arc::clone(&conn_pool), tx.clone()){
+                    println!("New connection: {:?}", &conn.address);
+                    conn_pool_locked.insert(conn.address, conn);
+                };
             }
         }
     });
