@@ -1,0 +1,4 @@
+peer_addresses:
+- 127.0.0.1:7878
+server_address: 127.0.0.1:8080
+capacity: 5

@@ -53,14 +53,14 @@ impl ConnectionManager {
     /// 
     /// You can provide vector of addresses which can be used to connect to the other
     /// nodes initially as well as launching server by providin `server_address`
-    pub fn new <T:ToSocketAddrs, U: 'static + ToSocketAddrs + Send + Sync>
-    (addrs: T, server_address: Option<U>) -> ConnectionManager
+    pub fn new
+    (addrs: Vec<SocketAddr>, server_address: Option<SocketAddr>, capacity: usize) -> ConnectionManager
     {
-        let pools = Arc::new(Mutex::new(HashMap::new()));
+        let pools = Arc::new(Mutex::new(HashMap::with_capacity(capacity)));
         let (register_done, register_handle, addr_sender) = 
             start_connection_registerer(Arc::clone(&pools)).unwrap();
 
-        for address in addrs.to_socket_addrs().unwrap() {
+        for address in addrs.into_iter() {
             addr_sender.send(address).unwrap();
         }
 
