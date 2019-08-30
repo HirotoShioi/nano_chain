@@ -17,7 +17,6 @@ pub enum TransactionError {
 use self::TransactionError::*;
 
 impl UTXO {
-
     pub fn get_output(&self, input: &Input) -> Option<&Output> {
         self.store.get(input)
     }
@@ -30,22 +29,22 @@ impl UTXO {
             store.insert(input, output);
         }
 
-        UTXO {
-            store
-        }
+        UTXO { store }
     }
 
-    pub fn process_transactions(&mut self, transactions: Vec<Transaction>) -> Result<(), TransactionError> {
-
+    pub fn process_transactions(
+        &mut self,
+        transactions: Vec<Transaction>,
+    ) -> Result<(), TransactionError> {
         for transaction in transactions.iter() {
             if let Err(err) = self.validate_transaction(transaction) {
-                return Err(err)
+                return Err(err);
             }
         }
 
         for transaction in transactions.into_iter() {
             if let Err(err) = self.process_transaction(transaction) {
-                return Err(err)
+                return Err(err);
             };
         }
 
@@ -53,11 +52,10 @@ impl UTXO {
     }
 
     pub fn validate_transaction(&self, transaction: &Transaction) -> Result<(), TransactionError> {
-
         if transaction.inputs.is_empty() {
-            return Err(EmptyInput(transaction.id))
+            return Err(EmptyInput(transaction.id));
         }
-        
+
         let mut input_sum = 0;
         for input in transaction.inputs.iter() {
             match self.store.get(input) {
@@ -77,7 +75,7 @@ impl UTXO {
         if input_sum < output_sum {
             return Err(InsufficientAmount(transaction.id));
         }
-    
+
         Ok(())
     }
 
@@ -85,7 +83,7 @@ impl UTXO {
         //Process inputs
         for input in transaction.inputs.iter() {
             if self.store.remove(&input).is_none() {
-                return Err(InputNotFound(transaction.id))
+                return Err(InputNotFound(transaction.id));
             };
         }
 
@@ -118,10 +116,7 @@ pub struct Input {
 
 impl Input {
     pub fn new(index: Index, id: TransactionId) -> Input {
-        Input {
-            index,
-            id,
-        }
+        Input { index, id }
     }
 }
 
@@ -160,13 +155,13 @@ impl Transaction {
 #[cfg(test)]
 mod utxo_test {
     use super::*;
-    
+
     fn initial_outputs() -> Vec<Output> {
         vec![
             Output::new(10000, "Lars"),
             Output::new(100000, "Andres"),
             Output::new(2000000, "Charles"),
-            Output::new(10000, "Hiroto")
+            Output::new(10000, "Hiroto"),
         ]
     }
     fn test_utxo() -> UTXO {
@@ -181,12 +176,11 @@ mod utxo_test {
         for (index, output) in outputs.iter().enumerate() {
             let input = Input::new(index, TransactionId(0));
             assert_eq!(utxo.get_output(&input), Some(output));
-        } 
+        }
     }
 
     #[test]
     fn process_single_transaction() {
-
         let mut inputs: Vec<Input> = Vec::new();
 
         for num in 0..2 {
@@ -194,10 +188,7 @@ mod utxo_test {
             inputs.push(input);
         }
 
-        let outputs = vec![
-            Output::new(1000, "Dog"),
-            Output::new(20000, "Cat"),
-        ];
+        let outputs = vec![Output::new(1000, "Dog"), Output::new(20000, "Cat")];
 
         let outputs_copy = outputs.clone();
 
@@ -223,7 +214,6 @@ mod utxo_test {
 
     #[test]
     fn invalid_input_should_throw_error() {
-
         const INVALID_TX_ID: TransactionId = TransactionId(10);
 
         // Here we create inputs that does not exist in UTXO
@@ -233,10 +223,7 @@ mod utxo_test {
             inputs.push(input);
         }
 
-        let outputs = vec![
-            Output::new(1000, "Dog"),
-            Output::new(20000, "Cat"),
-        ];
+        let outputs = vec![Output::new(1000, "Dog"), Output::new(20000, "Cat")];
 
         let transaction = Transaction::new(TransactionId(1), inputs, outputs);
 
@@ -245,7 +232,7 @@ mod utxo_test {
         assert_eq!(
             utxo.process_transactions(vec![transaction]),
             Err(InputNotFound(TransactionId(1)))
-            );
+        );
     }
 
     #[test]
@@ -257,20 +244,16 @@ mod utxo_test {
             inputs.push(input);
         }
 
-        let outputs = vec![
-            Output::new(1000000, "Dog"),
-            Output::new(2000000, "Cat"),
-        ];
+        let outputs = vec![Output::new(1000000, "Dog"), Output::new(2000000, "Cat")];
 
         let transaction = Transaction::new(TransactionId(1), inputs, outputs);
 
         let mut utxo = test_utxo();
-        
+
         assert_eq!(
             utxo.process_transactions(vec![transaction]),
             Err(InsufficientAmount(TransactionId(1)))
         );
-
     }
 
     #[test]
