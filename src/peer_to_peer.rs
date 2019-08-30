@@ -60,6 +60,8 @@ impl ConnectionManager {
         let (register_done, register_handle, addr_sender) = 
             start_connection_registerer(Arc::clone(&pools)).unwrap();
 
+        //Spawn thread for proactive messaging
+
         for address in addrs.into_iter() {
             addr_sender.send(address).unwrap();
         }
@@ -97,7 +99,8 @@ pub enum SendMessage {
     Ping,
     NewBlock(usize),
     Peer(String),
-    AskPeer(Vec<SocketAddr>), // Address are connnected
+    AskPeer(SocketAddr, Vec<SocketAddr>, usize), // Address are connnected
+    ReplyPeer(Vec<SocketAddr>, usize),
 }
 
 use super::SendMessage::*;
@@ -108,7 +111,8 @@ pub enum RecvMessage {
     Ping,
     Pong,
     NewBlock(usize),
-    Peer(Vec<SocketAddr>), // Given AskPeer, provide addresses that we don't know
+    AskPeer(SocketAddr, Vec<SocketAddr>, usize),
+    ReplyPeer(Vec<SocketAddr>, usize), // Given AskPeer, provide addresses that we don't know
 }
 
 ///Connection handles message handling between peers
@@ -156,8 +160,6 @@ impl Connection {
                     .expect("Unable to flush stream");
             }      
         });
-
-        //Perhaps make a thread for automating sends here?
 
         //Handles incoming message
         let read_done = Arc::clone(&done);
@@ -272,10 +274,24 @@ fn handle_recv_message
             RecvMessage::Ping => send_message(&stream, Pong)?,
             RecvMessage::Pong => {},
             RecvMessage::NewBlock(num) => broadcast(Arc::clone(&pool), NewBlock(num))?,
-            RecvMessage::Peer(socket_addresses) => {
+            RecvMessage::ReplyPeer(socket_addresses, size) => {
+                socket_addresses.to_owned().truncate(size);
                 for socket_addr in socket_addresses {
+                    // Registerer will handle filtering
                     conn_sender.send(socket_addr)?;
                 }
+            },
+            RecvMessage::AskPeer(their_address, their_known_address, _size) => {
+                let mut their_known_address = their_known_address.to_owned();
+                their_known_address.push(their_address);
+                let new_addresses: Vec<SocketAddr> = pool.lock().unwrap().keys()
+                    .filter(|key| {!their_known_address.contains(key)})
+                    .map(|k| {k.to_owned()})
+                    .collect();
+
+                let addr_len = new_addresses.len();
+                let send_msg = SendMessage::ReplyPeer(new_addresses, addr_len);
+                send_message(stream, send_msg).unwrap();
             }
         }
     }
