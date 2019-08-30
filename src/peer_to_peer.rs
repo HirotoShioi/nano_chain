@@ -11,8 +11,6 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 
 ///Connection pool handling messages between peers
-///TODO: Should make interface such that it limits the number of connection
-//Bug: Inserting existing address to the pool will cause main thread to block indefinately
 type ConnectionPool = Arc<Mutex<HashMap<SocketAddr, Connection>>>;
 
 type PeerResult<T> = Result<T, Box<dyn error::Error>>;
@@ -85,34 +83,25 @@ impl ConnectionManager {
         Ok(())
     }
 
-    /// Broadcast `SendMessage` to the known peer
-    pub fn broadcast(&self, message: SendMessage) -> PeerResult<()>{
+    /// Broadcast `ProtocolMessage` to the known peer
+    pub fn broadcast(&self, message: ProtocolMessage) -> PeerResult<()>{
         broadcast(Arc::clone(&self.pools), message)
     }
 
 }
 
 ///Set of messages that can be sent
+
+use super::peer_to_peer::ProtocolMessage::*;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum SendMessage {
-    Pong,
+pub enum ProtocolMessage {
     Ping,
-    NewBlock(usize),
-    Peer(String),
+    Pong,
+    NewBlock(usize), /// Broadcast new block when minted
+    ReplyBlock(usize), /// If you have bigger number, reply with this message
     AskPeer(SocketAddr, Vec<SocketAddr>, usize), // Address are connnected
     ReplyPeer(Vec<SocketAddr>, usize),
-}
-
-use super::SendMessage::*;
-
-///Set of message that can be received within the network
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum RecvMessage {
-    Ping,
-    Pong,
-    NewBlock(usize),
-    AskPeer(SocketAddr, Vec<SocketAddr>, usize),
-    ReplyPeer(Vec<SocketAddr>, usize), // Given AskPeer, provide addresses that we don't know
 }
 
 ///Connection handles message handling between peers
@@ -125,7 +114,7 @@ pub struct Connection {
     // Thread handle for receive operation
     recv_thread: Option<JoinHandle<()>>,
     // Used to send message to the peer
-    conn_sender: Option<mpsc::Sender<SendMessage>>,
+    conn_sender: Option<mpsc::Sender<ProtocolMessage>>,
     // Used to shutdown connection gracefully
     done: Arc<AtomicBool>,
 }
@@ -217,7 +206,7 @@ impl Drop for Connection {
 }
 
 /// Broadcast given `message` to the known peers
-fn broadcast(pools: ConnectionPool, message: SendMessage) -> PeerResult<()> {
+fn broadcast(pools: ConnectionPool, message: ProtocolMessage) -> PeerResult<()> {
     // If any of the `send` fails, store the `SocketAddr` here so it can later be
     // removed.
     let mut failed_addr = Vec::new();
@@ -268,20 +257,28 @@ fn handle_recv_message
     let mut reader = BufReader::new(stream);
     let mut buffer = String::new();
     if reader.read_line(&mut buffer).is_ok() {
-        let recv_message: RecvMessage = serde_json::from_str(&buffer)?;
+        let recv_message: ProtocolMessage = serde_json::from_str(&buffer)?;
         println!("Got message: {:?}", recv_message);
         match recv_message {
-            RecvMessage::Ping => send_message(&stream, Pong)?,
-            RecvMessage::Pong => {},
-            RecvMessage::NewBlock(num) => broadcast(Arc::clone(&pool), NewBlock(num))?,
-            RecvMessage::ReplyPeer(socket_addresses, size) => {
+            Ping => send_message(&stream, Pong)?,
+            Pong => {},
+            NewBlock(num) => {
+                //check if new number is bigger
+                //if yes, update it and broadcast to the others
+                broadcast(Arc::clone(&pool), NewBlock(num))?
+            },
+            ReplyBlock(_num) => {
+                //check if new number is bigger
+                //if yes, update it and broadcast to the others
+            },
+            ReplyPeer(socket_addresses, size) => {
                 socket_addresses.to_owned().truncate(size);
                 for socket_addr in socket_addresses {
                     // Registerer will handle filtering
                     conn_sender.send(socket_addr)?;
                 }
             },
-            RecvMessage::AskPeer(their_address, their_known_address, _size) => {
+            AskPeer(their_address, their_known_address, _size) => {
                 let mut their_known_address = their_known_address.to_owned();
                 their_known_address.push(their_address);
                 let new_addresses: Vec<SocketAddr> = pool.lock().unwrap().keys()
@@ -290,18 +287,18 @@ fn handle_recv_message
                     .collect();
 
                 let addr_len = new_addresses.len();
-                let send_msg = SendMessage::ReplyPeer(new_addresses, addr_len);
-                send_message(stream, send_msg).unwrap();
+                let msg = ReplyPeer(new_addresses, addr_len);
+                send_message(stream, msg).unwrap();
             }
         }
     }
     Ok(())
 }
 
-///Send `SendMessage` the given stream
-fn send_message(stream: &TcpStream, send_message: SendMessage) -> PeerResult<()>{
+///Send `ProtocolMessage` the given stream
+fn send_message(stream: &TcpStream, message: ProtocolMessage) -> PeerResult<()>{
     let mut stream_clone = stream.try_clone()?;
-    serde_json::to_writer(stream, &send_message)?;
+    serde_json::to_writer(stream, &message)?;
     stream_clone.write_all(b"\n")?;
     stream_clone.flush()?;
     Ok(())

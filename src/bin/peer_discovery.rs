@@ -9,7 +9,7 @@ use std::thread;
 use std::net::SocketAddr;
 use std::fs;
 
-use nano_chain::{ConnectionManager, SendMessage};
+use nano_chain::{ConnectionManager, ProtocolMessage};
 
 // ./target/release/peer_discovery -c ./config/node4.yaml 
 fn main() {
@@ -38,7 +38,7 @@ fn main() {
     loop {
         thread::sleep(Duration::from_secs(5));
         println!("Block minted: {}", num);
-        pool.broadcast(SendMessage::NewBlock(num)).unwrap();
+        pool.broadcast(ProtocolMessage::NewBlock(num)).unwrap();
         num += 1;
     }
 }
