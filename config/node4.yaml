@@ -1,3 +1,4 @@
-peer_addresses: []
-server_address: 127.0.0.1:6000
-capacity: 5
+peer_addresses:
+- 127.0.0.1:8003
+server_address: 127.0.0.1:7878
+capacity: 4

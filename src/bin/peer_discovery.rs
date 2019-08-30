@@ -38,13 +38,13 @@ fn main() {
         node_config.capacity,
     );
 
-    let mut num = 0;
-    loop {
-        thread::sleep(Duration::from_secs(5));
-        println!("Block minted: {}", num);
-        pool.broadcast(ProtocolMessage::NewBlock(num)).unwrap();
-        num += 1;
-    }
+    // let mut num = 0;
+    // loop {
+    //     thread::sleep(Duration::from_secs(20));
+    //     println!("Block minted: {}", num);
+    //     pool.broadcast(ProtocolMessage::NewBlock(num)).unwrap();
+    //     num += 1;
+    // }
 }
 
 #[derive(Debug, Deserialize)]

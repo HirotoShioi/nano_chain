@@ -22,18 +22,23 @@ pub struct ConnectionManager {
     server_handle: Option<JoinHandle<()>>,
     register_done: Arc<AtomicBool>,
     register_handle: Option<JoinHandle<()>>,
+    messenger_done: Arc<AtomicBool>,
+    messenger_handle: Option<JoinHandle<()>>,
     addr_sender: mpsc::Sender<SocketAddr>,
 }
 
 impl Drop for ConnectionManager {
     fn drop(&mut self) {
+        self.register_done.store(true, Ordering::Relaxed);
+        self.messenger_done.store(true, Ordering::Relaxed);
+
         if let Some(thread) = self.server_handle.take() {
             thread.join().unwrap();
         }
-
-        self.register_done.store(true, Ordering::Relaxed);
-
         if let Some(thread) = self.register_handle.take() {
+            thread.join().unwrap();
+        }
+        if let Some(thread) = self.messenger_handle.take() {
             thread.join().unwrap();
         }
     }
@@ -60,8 +65,6 @@ impl ConnectionManager {
         let (register_done, register_handle, addr_sender) =
             start_connection_registerer(Arc::clone(&pools)).unwrap();
 
-        //Spawn thread for proactive messaging
-
         for address in addrs.into_iter() {
             addr_sender.send(address).unwrap();
         }
@@ -69,11 +72,18 @@ impl ConnectionManager {
         let server_handle = Some(
             start_listener(Arc::clone(&pools), addr_sender.to_owned(), server_address).unwrap(),
         );
+
+        //Spawn thread for proactive messaging
+        let (messenger_done, messenger_handle) =
+            start_messenger(Arc::clone(&pools), capacity, server_address).unwrap();
+
         ConnectionManager {
             pools,
             server_handle,
             register_done,
             register_handle: Some(register_handle),
+            messenger_done,
+            messenger_handle: Some(messenger_handle),
             addr_sender,
         }
     }
@@ -206,10 +216,12 @@ impl Drop for Connection {
 
 /// Broadcast given `message` to the known peers
 fn broadcast(pools: ConnectionPool, message: ProtocolMessage) -> PeerResult<()> {
+    let mut pools = pools.lock().unwrap();
     // If any of the `send` fails, store the `SocketAddr` here so it can later be
     // removed.
     let mut failed_addr = Vec::new();
-    for (socket_addr, conn) in pools.lock().unwrap().iter_mut() {
+
+    for (socket_addr, conn) in pools.iter_mut() {
         if let Some(sender) = &conn.conn_sender {
             if sender.send(message.to_owned()).is_err() {
                 failed_addr.push(socket_addr.to_owned());
@@ -218,13 +230,14 @@ fn broadcast(pools: ConnectionPool, message: ProtocolMessage) -> PeerResult<()> 
     }
 
     for socket_addr in failed_addr.iter() {
-        pools.lock().unwrap().remove(socket_addr);
+        pools.remove(socket_addr);
     }
-
+    
     Ok(())
 }
 
 ///Start the network server by binding to given address
+// If listener cannot be binded, let the program crash.
 fn start_listener<T: 'static + ToSocketAddrs + Sync + Send>(
     pools: ConnectionPool,
     conn_adder: mpsc::Sender<SocketAddr>,
@@ -264,7 +277,6 @@ fn handle_recv_message(
             NewBlock(num) => {
                 //check if new number is bigger
                 //if yes, update it and broadcast to the others
-                broadcast(Arc::clone(&pool), NewBlock(num))?
             }
             ReplyBlock(_num) => {
                 //check if new number is bigger
@@ -280,6 +292,7 @@ fn handle_recv_message(
             AskPeer(their_address, their_known_address, _size) => {
                 let mut their_known_address = their_known_address.to_owned();
                 their_known_address.push(their_address);
+                // Bugged
                 let new_addresses: Vec<SocketAddr> = pool
                     .lock()
                     .unwrap()
@@ -299,6 +312,7 @@ fn handle_recv_message(
 
 ///Send `ProtocolMessage` the given stream
 fn send_message(stream: &TcpStream, message: ProtocolMessage) -> PeerResult<()> {
+    println!("Sending message: {:?}", message);
     let mut stream_clone = stream.try_clone()?;
     serde_json::to_writer(stream, &message)?;
     stream_clone.write_all(b"\n")?;
@@ -328,4 +342,30 @@ fn start_connection_registerer(
         }
     });
     Ok((is_done, handle, tx_c))
+}
+
+fn start_messenger(
+    conn_pool: ConnectionPool,
+    capacity: usize,
+    my_address: SocketAddr,
+) -> PeerResult<(Arc<AtomicBool>, JoinHandle<()>)> {
+    let messenger_done = Arc::new(AtomicBool::new(false));
+    let messenger_done_c = Arc::clone(&messenger_done);
+    let messender_handle = thread::spawn(move || {
+        while !messenger_done_c.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_secs(10));
+            let conn_pool = Arc::clone(&conn_pool);
+            let conn_pool_c = Arc::clone(&conn_pool);
+            let conn_pool = conn_pool.lock().unwrap();
+            let conn_len = conn_pool.len();
+            if conn_len < capacity {
+                let conn_addr: Vec<SocketAddr> = conn_pool.keys().map(|k| k.to_owned()).collect();
+                let ask_message = AskPeer(my_address, conn_addr, conn_len);
+                drop(conn_pool);
+                broadcast(conn_pool_c, ask_message).unwrap();
+            }
+        }
+    });
+
+    Ok((messenger_done, messender_handle))
 }

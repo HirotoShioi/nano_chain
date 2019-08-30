@@ -1,4 +1,3 @@
-peer_addresses:
-- 127.0.0.1:8080
-server_address: 127.0.0.1:8000
-capacity: 5
+peer_addresses: []
+server_address: 127.0.0.1:8001
+capacity: 1
