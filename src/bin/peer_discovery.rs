@@ -6,10 +6,10 @@ use serde::Deserialize;
 
 use std::fs;
 use std::net::SocketAddr;
-use std::thread;
-use std::time::Duration;
+// use std::thread;
+// use std::time::Duration;
 
-use nano_chain::{ConnectionManager, ProtocolMessage};
+use nano_chain::{ConnectionManager};
 
 // ./target/release/peer_discovery -c ./config/node4.yaml
 fn main() {
@@ -32,11 +32,12 @@ fn main() {
 
     println!("{:?}", node_config);
     println!("Starting node");
-    let pool = ConnectionManager::new(
+    ConnectionManager::new(
         node_config.peer_addresses,
         node_config.server_address,
         node_config.capacity,
-    );
+    )
+    .start();
 
     // let mut num = 0;
     // loop {
