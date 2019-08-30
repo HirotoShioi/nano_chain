@@ -54,7 +54,7 @@ impl ConnectionManager {
     /// You can provide vector of addresses which can be used to connect to the other
     /// nodes initially as well as launching server by providin `server_address`
     pub fn new
-    (addrs: Vec<SocketAddr>, server_address: Option<SocketAddr>, capacity: usize) -> ConnectionManager
+    (addrs: Vec<SocketAddr>, server_address: SocketAddr, capacity: usize) -> ConnectionManager
     {
         let pools = Arc::new(Mutex::new(HashMap::with_capacity(capacity)));
         let (register_done, register_handle, addr_sender) = 
@@ -64,15 +64,9 @@ impl ConnectionManager {
             addr_sender.send(address).unwrap();
         }
 
-        let server_handle = match server_address {
-            Some(address) => 
-                Some(start_listener(Arc::clone(&pools),
-                    addr_sender.clone(), 
-                    address).unwrap()
-                    ),
-            None => None,
-        };
-
+        let server_handle = Some(start_listener(Arc::clone(&pools),
+                                addr_sender.clone(), 
+                                server_address).unwrap());
         ConnectionManager {
             pools,
             server_handle,
@@ -103,7 +97,7 @@ pub enum SendMessage {
     Ping,
     NewBlock(usize),
     Peer(String),
-    AskPeer,
+    AskPeer(Vec<SocketAddr>), // Address are connnected
 }
 
 use super::SendMessage::*;
@@ -114,7 +108,7 @@ pub enum RecvMessage {
     Ping,
     Pong,
     NewBlock(usize),
-    Peer(String),
+    Peer(Vec<SocketAddr>), // Given AskPeer, provide addresses that we don't know
 }
 
 ///Connection handles message handling between peers
@@ -162,6 +156,8 @@ impl Connection {
                     .expect("Unable to flush stream");
             }      
         });
+
+        //Perhaps make a thread for automating sends here?
 
         //Handles incoming message
         let read_done = Arc::clone(&done);
@@ -276,9 +272,10 @@ fn handle_recv_message
             RecvMessage::Ping => send_message(&stream, Pong)?,
             RecvMessage::Pong => {},
             RecvMessage::NewBlock(num) => broadcast(Arc::clone(&pool), NewBlock(num))?,
-            RecvMessage::Peer(addr) => {
-                let socket_addr = addr.parse().unwrap();
-                conn_sender.send(socket_addr)?;
+            RecvMessage::Peer(socket_addresses) => {
+                for socket_addr in socket_addresses {
+                    conn_sender.send(socket_addr)?;
+                }
             }
         }
     }

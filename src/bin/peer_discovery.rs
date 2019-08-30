@@ -31,7 +31,7 @@ fn main() {
     println!("{:?}", node_config);
     println!("Starting node");
     let pool = ConnectionManager::new(node_config.peer_addresses,
-                                        Some(node_config.server_address),
+                                        node_config.server_address,
                                         node_config.capacity);
 
     let mut num = 0;
