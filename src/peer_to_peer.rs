@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use std::fmt;
 
 ///Connection pool handling messages between peers
 type ConnectionPool = Arc<Mutex<HashMap<SocketAddr, Connection>>>;
@@ -26,6 +27,7 @@ pub struct ConnectionManager {
     messenger_handle: Option<JoinHandle<()>>,
     addr_sender: mpsc::Sender<SocketAddr>,
     started: bool,
+    capacity: usize,
 }
 
 impl Drop for ConnectionManager {
@@ -64,6 +66,25 @@ pub enum PoolError {
     NoPool,
     FailedToCreateConnection,
     UnableToConnect,
+    ConnectionDenied
+}
+
+use super::PoolError::*;
+
+impl fmt::Display for PoolError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let msg = match self {
+            NoPool => "No connection available",
+            FailedToCreateConnection => "Failed to create connection",
+            UnableToConnect => "Unable to connect to the peer",
+            ConnectionDenied => "Connection request was rejected",
+        };
+        write!(f, "{}", msg)
+    }
+}
+
+impl error::Error for PoolError {
+
 }
 
 impl ConnectionManager {
@@ -78,7 +99,7 @@ impl ConnectionManager {
     ) -> ConnectionManager {
         let pools = Arc::new(Mutex::new(HashMap::with_capacity(capacity)));
         let (register_done, register_handle, addr_sender) =
-            start_connection_registerer(Arc::clone(&pools)).unwrap();
+            start_connection_registerer(server_address, capacity, Arc::clone(&pools)).unwrap();
 
         for address in addrs.into_iter() {
             addr_sender.send(address).unwrap();
@@ -97,6 +118,7 @@ impl ConnectionManager {
             messenger_handle: Some(messenger_handle),
             addr_sender,
             started: false,
+            capacity,
         }
     }
 
@@ -113,12 +135,15 @@ impl ConnectionManager {
         broadcast(Arc::clone(&self.pools), message)
     }
 
-    pub fn start(&self) {
+    pub fn start(&mut self) {
+        // Todo: drop self afterwards
         start_listener(
+            self.capacity,
             Arc::clone(&self.pools),
             self.addr_sender.to_owned(),
             self.server_address,
         );
+        // drop(self); Doesn't work
     }
 }
 
@@ -133,13 +158,15 @@ use super::peer_to_peer::ProtocolMessage::*;
 pub enum ProtocolMessage {
     Ping,
     Pong,
+    // Handshake
     Request(SocketAddr),
-    Accept,
-    Denied,
+    Accepted,
+    Denied, // Should be more specific (CapacityReached, AlreadyConnected, Denied)
+    // Sharing states
     NewBlock(usize),
     /// Broadcast new block when minted
     ReplyBlock(usize),
-    /// If you have bigger number, reply with this message
+    /// Exchange information about peers
     AskPeer(SocketAddr, Vec<SocketAddr>, usize), // Address are connnected
     ReplyPeer(Vec<SocketAddr>, usize),
     Exit,
@@ -164,6 +191,7 @@ pub struct Connection {
 impl Connection {
     ///Instantiate `Connection` and insert it into `ConnectionPool`
     fn connect_stream(
+        socket_addr: SocketAddr,
         stream: TcpStream,
         conn_pool: ConnectionPool,
         conn_adder: mpsc::Sender<SocketAddr>,
@@ -202,10 +230,8 @@ impl Connection {
             }
         });
 
-        let peer_addr = stream.peer_addr()?;
-
         let conn = Connection {
-            address: peer_addr,
+            address: socket_addr,
             stream: stream,
             send_thread: Some(send_thread),
             recv_thread: Some(recv_thread),
@@ -219,13 +245,19 @@ impl Connection {
     /// Create TCPStream with given SocketAddr
     ///If connection is successful, instantiate `Connection`
     fn connect(
+        my_address: SocketAddr,
         address: SocketAddr,
         conn_pool: ConnectionPool,
         conn_adder: mpsc::Sender<SocketAddr>,
     ) -> PeerResult<Connection> {
         let stream = TcpStream::connect(address)?;
-        let conn = Connection::connect_stream(stream, conn_pool, conn_adder).unwrap();
-        Ok(conn)
+        send_message(&stream, Request(my_address))?;
+        if let Ok(Accepted) = read_message(&stream) {
+            let conn = Connection::connect_stream(address, stream, conn_pool, conn_adder).unwrap();
+            Ok(conn)
+        } else {
+            return Err(Box::new(ConnectionDenied))
+        }
     }
 }
 
@@ -271,6 +303,7 @@ fn broadcast(pools: ConnectionPool, message: ProtocolMessage) -> PeerResult<()> 
 ///Start the network server by binding to given address
 // If listener cannot be binded, let the program crash.
 fn start_listener<T: 'static + ToSocketAddrs + Sync + Send>(
+    capacity: usize,
     pools: ConnectionPool,
     conn_adder: mpsc::Sender<SocketAddr>,
     address: T,
@@ -283,9 +316,17 @@ fn start_listener<T: 'static + ToSocketAddrs + Sync + Send>(
         let conn_pools_c = Arc::clone(&pools);
         thread::spawn(move || {
             let stream = stream.unwrap();
-            let conn =
-                Connection::connect_stream(stream, conn_pools, conn_adder_c).unwrap();
-            conn_pools_c.lock().unwrap().insert(conn.address, conn);
+            if let Ok(Request(socket_addr)) = read_message(&stream) {
+                let mut conn_pools = conn_pools.lock().unwrap();
+                if !conn_pools.contains_key(&socket_addr) && conn_pools.len() < capacity {
+                    send_message(&stream, Accepted).unwrap();
+                    let conn =
+                        Connection::connect_stream(socket_addr.to_owned(), stream, conn_pools_c, conn_adder_c).unwrap();
+                    conn_pools.insert(socket_addr, conn);
+                }
+            } else {
+                send_message(&stream, Denied).unwrap();
+            }
         });
     }
 }
@@ -297,7 +338,6 @@ fn handle_recv_message(
     conn_sender: mpsc::Sender<SocketAddr>,
 ) -> PeerResult<()> {
     if let Ok(recv_message) = read_message(&stream) {
-        println!("Got message: {:?}", recv_message);
         match recv_message {
             Ping => send_message(&stream, Pong)?,
             Request(socket_addr) => {
@@ -356,10 +396,13 @@ fn read_message(stream: &TcpStream) -> PeerResult<ProtocolMessage> {
     let mut buffer = String::new();
     reader.read_line(&mut buffer)?;
     let recv_message: ProtocolMessage = serde_json::from_str(&buffer)?;
+    println!("Got message: {:?}", recv_message);
     Ok(recv_message)
 }
 
 fn start_connection_registerer(
+    my_addr: SocketAddr,
+    capacity: usize,
     conn_pool: ConnectionPool,
 ) -> PeerResult<(Arc<AtomicBool>, JoinHandle<()>, mpsc::Sender<SocketAddr>)> {
     let (tx, rx) = mpsc::channel::<SocketAddr>();
@@ -370,9 +413,9 @@ fn start_connection_registerer(
         while !is_done_c.load(Ordering::Relaxed) {
             let socket_addr = rx.recv().unwrap();
             let mut conn_pool_locked = conn_pool.lock().unwrap();
-            if !conn_pool_locked.contains_key(&socket_addr) {
+            if !conn_pool_locked.contains_key(&socket_addr) && conn_pool_locked.len() < capacity {
                 if let Ok(conn) =
-                    Connection::connect(socket_addr, Arc::clone(&conn_pool), tx.clone())
+                    Connection::connect(my_addr, socket_addr, Arc::clone(&conn_pool), tx.clone())
                 {
                     println!("New connection: {:?}", &conn.address);
                     conn_pool_locked.insert(conn.address, conn);

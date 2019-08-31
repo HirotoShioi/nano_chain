@@ -32,7 +32,8 @@ fn main() {
 
     println!("{:?}", node_config);
     println!("Starting node");
-    let s = ConnectionManager::new(
+    
+    ConnectionManager::new(
         node_config.peer_addresses,
         node_config.server_address,
         node_config.capacity,
