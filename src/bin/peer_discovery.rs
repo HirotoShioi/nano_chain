@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 // use std::thread;
 // use std::time::Duration;
 
-use nano_chain::{ConnectionManager};
+use nano_chain::ConnectionManager;
 
 // ./target/release/peer_discovery -c ./config/node4.yaml
 fn main() {
@@ -32,7 +32,7 @@ fn main() {
 
     println!("{:?}", node_config);
     println!("Starting node");
-    
+
     ConnectionManager::new(
         node_config.peer_addresses,
         node_config.server_address,

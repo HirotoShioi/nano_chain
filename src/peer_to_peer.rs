@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::HashMap;
 use std::error;
+use std::fmt;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
@@ -9,7 +10,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use std::fmt;
 
 ///Connection pool handling messages between peers
 type ConnectionPool = Arc<Mutex<HashMap<SocketAddr, Connection>>>;
@@ -65,7 +65,7 @@ pub enum PoolError {
     NoPool,
     FailedToCreateConnection,
     UnableToConnect,
-    ConnectionDenied
+    ConnectionDenied,
 }
 
 use super::PoolError::*;
@@ -82,9 +82,7 @@ impl fmt::Display for PoolError {
     }
 }
 
-impl error::Error for PoolError {
-
-}
+impl error::Error for PoolError {}
 
 impl ConnectionManager {
     /// Create an instance of `ConnectionManager`
@@ -160,7 +158,7 @@ pub enum ProtocolMessage {
     Accepted,
     Denied,
     CapacityReached,
-    AlreadyConnected,// Should be more specific (CapacityReached, AlreadyConnected, Denied)
+    AlreadyConnected, // Should be more specific (CapacityReached, AlreadyConnected, Denied)
     // Sharing states
     NewBlock(usize),
     /// Broadcast new block when minted
@@ -231,7 +229,7 @@ impl Connection {
 
         let conn = Connection {
             address: socket_addr,
-            stream: stream,
+            stream,
             send_thread: Some(send_thread),
             recv_thread: Some(recv_thread),
             conn_sender: Some(conn_sender),
@@ -255,7 +253,7 @@ impl Connection {
             let conn = Connection::connect_stream(address, stream, conn_pool, conn_adder).unwrap();
             Ok(conn)
         } else {
-            return Err(Box::new(ConnectionDenied))
+            Err(Box::new(ConnectionDenied))
         }
     }
 }
@@ -318,10 +316,15 @@ fn start_listener<T: 'static + ToSocketAddrs + Sync + Send>(
                 match is_connection_acceptable(&socket_addr, &conn_pools) {
                     None => {
                         send_message(&stream, Accepted).unwrap();
-                        let conn =
-                            Connection::connect_stream(socket_addr.to_owned(), stream, conn_pools_c, conn_adder_c).unwrap();
+                        let conn = Connection::connect_stream(
+                            socket_addr.to_owned(),
+                            stream,
+                            conn_pools_c,
+                            conn_adder_c,
+                        )
+                        .unwrap();
                         conn_pools.lock().unwrap().insert(socket_addr, conn);
-                    },
+                    }
                     Some(err_message) => send_message(&stream, err_message).unwrap(),
                 }
             } else {
@@ -448,13 +451,17 @@ fn start_messenger(
     Ok((messenger_done, messender_handle))
 }
 
-fn is_connection_acceptable(socket_addr: &SocketAddr, conn_pool: &ConnectionPool) -> Option<ProtocolMessage> {
+//This can be tested!
+fn is_connection_acceptable(
+    socket_addr: &SocketAddr,
+    conn_pool: &ConnectionPool,
+) -> Option<ProtocolMessage> {
     let conn_pool = conn_pool.lock().unwrap();
     if conn_pool.contains_key(socket_addr) {
-        return Some(AlreadyConnected)
+        Some(AlreadyConnected)
     } else if conn_pool.len() >= conn_pool.capacity() {
-        return Some(CapacityReached)
+        Some(CapacityReached)
     } else {
-        return None
+        None
     }
 }
