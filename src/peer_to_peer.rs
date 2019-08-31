@@ -31,12 +31,28 @@ pub struct ConnectionManager {
 impl Drop for ConnectionManager {
     fn drop(&mut self) {
         println!("Dropping");
+
+        self.broadcast(Exit).unwrap();
+
+        //Drop all the pool
+        for (_socket, conn) in self.pools.lock().unwrap().iter_mut() {
+            conn.done.store(true, Ordering::Relaxed);
+            if let Some(thread) = conn.send_thread.take() {
+                thread.join().unwrap();
+            }
+
+            if let Some(thread) = conn.recv_thread.take() {
+                thread.join().unwrap();
+            }
+        }
+
         self.register_done.store(true, Ordering::Relaxed);
-        self.messenger_done.store(true, Ordering::Relaxed);
 
         if let Some(thread) = self.register_handle.take() {
             thread.join().unwrap();
         }
+
+        self.messenger_done.store(true, Ordering::Relaxed);
         if let Some(thread) = self.messenger_handle.take() {
             thread.join().unwrap();
         }
@@ -97,8 +113,7 @@ impl ConnectionManager {
         broadcast(Arc::clone(&self.pools), message)
     }
 
-    pub fn start(&mut self) {
-        self.started = true;
+    pub fn start(&self) {
         start_listener(
             Arc::clone(&self.pools),
             self.addr_sender.to_owned(),
@@ -107,6 +122,10 @@ impl ConnectionManager {
     }
 }
 
+//------------------------------------------------------------------------------
+// Protocol
+//------------------------------------------------------------------------------
+
 ///Set of messages that can be sent
 use super::peer_to_peer::ProtocolMessage::*;
 
@@ -114,12 +133,16 @@ use super::peer_to_peer::ProtocolMessage::*;
 pub enum ProtocolMessage {
     Ping,
     Pong,
+    Request(SocketAddr),
+    Accept,
+    Denied,
     NewBlock(usize),
     /// Broadcast new block when minted
     ReplyBlock(usize),
     /// If you have bigger number, reply with this message
     AskPeer(SocketAddr, Vec<SocketAddr>, usize), // Address are connnected
     ReplyPeer(Vec<SocketAddr>, usize),
+    Exit,
 }
 
 ///Connection handles message handling between peers
@@ -152,7 +175,6 @@ impl Connection {
         //Handles sending messages
         let send_done = Arc::clone(&done);
         let mut send_stream = stream.try_clone()?;
-        send_message(&send_stream, Ping)?;
         let send_thread = thread::spawn(move || {
             while !send_done.load(Ordering::Relaxed) {
                 // Can you make it such that if any of the function fails,
@@ -260,8 +282,9 @@ fn start_listener<T: 'static + ToSocketAddrs + Sync + Send>(
         let conn_adder_c = conn_adder.clone();
         let conn_pools_c = Arc::clone(&pools);
         thread::spawn(move || {
+            let stream = stream.unwrap();
             let conn =
-                Connection::connect_stream(stream.unwrap(), conn_pools, conn_adder_c).unwrap();
+                Connection::connect_stream(stream, conn_pools, conn_adder_c).unwrap();
             conn_pools_c.lock().unwrap().insert(conn.address, conn);
         });
     }
@@ -273,14 +296,13 @@ fn handle_recv_message(
     pool: ConnectionPool,
     conn_sender: mpsc::Sender<SocketAddr>,
 ) -> PeerResult<()> {
-    let mut reader = BufReader::new(stream);
-    let mut buffer = String::new();
-    if reader.read_line(&mut buffer).is_ok() {
-        let recv_message: ProtocolMessage = serde_json::from_str(&buffer)?;
+    if let Ok(recv_message) = read_message(&stream) {
         println!("Got message: {:?}", recv_message);
         match recv_message {
             Ping => send_message(&stream, Pong)?,
-            Pong => {}
+            Request(socket_addr) => {
+                conn_sender.send(socket_addr)?; // Handling!
+            }
             NewBlock(_num) => {
                 //check if new number is bigger
                 //if yes, update it and broadcast to the others
@@ -312,8 +334,9 @@ fn handle_recv_message(
                 let msg = ReplyPeer(new_addresses, addr_len);
                 send_message(stream, msg).unwrap();
             }
+            _ => {}
         }
-    }
+    };
     Ok(())
 }
 
@@ -326,6 +349,14 @@ fn send_message(stream: &TcpStream, message: ProtocolMessage) -> PeerResult<()> 
     stream_clone.write_all(b"\n")?;
     stream_clone.flush()?;
     Ok(())
+}
+
+fn read_message(stream: &TcpStream) -> PeerResult<ProtocolMessage> {
+    let mut reader = BufReader::new(stream);
+    let mut buffer = String::new();
+    reader.read_line(&mut buffer)?;
+    let recv_message: ProtocolMessage = serde_json::from_str(&buffer)?;
+    Ok(recv_message)
 }
 
 fn start_connection_registerer(
@@ -364,6 +395,7 @@ fn start_messenger(
             thread::sleep(Duration::from_secs(10));
             let conn_pool = Arc::clone(&conn_pool);
             let conn_pool_c = Arc::clone(&conn_pool);
+            // perform clean up (remove dead connection)
             let conn_pool = conn_pool.lock().unwrap();
             let conn_len = conn_pool.len();
             if conn_len < capacity {

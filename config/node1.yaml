@@ -1,3 +1,4 @@
 peer_addresses: []
 server_address: 127.0.0.1:8001
 capacity: 1
+mining: false

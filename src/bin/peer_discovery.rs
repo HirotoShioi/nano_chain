@@ -32,20 +32,12 @@ fn main() {
 
     println!("{:?}", node_config);
     println!("Starting node");
-    ConnectionManager::new(
+    let s = ConnectionManager::new(
         node_config.peer_addresses,
         node_config.server_address,
         node_config.capacity,
     )
     .start();
-
-    // let mut num = 0;
-    // loop {
-    //     thread::sleep(Duration::from_secs(20));
-    //     println!("Block minted: {}", num);
-    //     pool.broadcast(ProtocolMessage::NewBlock(num)).unwrap();
-    //     num += 1;
-    // }
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +45,7 @@ pub struct NodeConfig {
     peer_addresses: Vec<SocketAddr>,
     server_address: SocketAddr,
     capacity: usize,
+    mining: bool,
 }
 
 fn read_node_config(config_path: &str) -> std::io::Result<NodeConfig> {
