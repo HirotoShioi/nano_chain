@@ -27,7 +27,6 @@ pub struct ConnectionManager {
     messenger_handle: Option<JoinHandle<()>>,
     addr_sender: mpsc::Sender<SocketAddr>,
     started: bool,
-    capacity: usize,
 }
 
 impl Drop for ConnectionManager {
@@ -99,7 +98,7 @@ impl ConnectionManager {
     ) -> ConnectionManager {
         let pools = Arc::new(Mutex::new(HashMap::with_capacity(capacity)));
         let (register_done, register_handle, addr_sender) =
-            start_connection_registerer(server_address, capacity, Arc::clone(&pools)).unwrap();
+            start_connection_registerer(server_address, Arc::clone(&pools)).unwrap();
 
         for address in addrs.into_iter() {
             addr_sender.send(address).unwrap();
@@ -118,7 +117,6 @@ impl ConnectionManager {
             messenger_handle: Some(messenger_handle),
             addr_sender,
             started: false,
-            capacity,
         }
     }
 
@@ -138,7 +136,6 @@ impl ConnectionManager {
     pub fn start(&mut self) {
         // Todo: drop self afterwards
         start_listener(
-            self.capacity,
             Arc::clone(&self.pools),
             self.addr_sender.to_owned(),
             self.server_address,
@@ -161,7 +158,9 @@ pub enum ProtocolMessage {
     // Handshake
     Request(SocketAddr),
     Accepted,
-    Denied, // Should be more specific (CapacityReached, AlreadyConnected, Denied)
+    Denied,
+    CapacityReached,
+    AlreadyConnected,// Should be more specific (CapacityReached, AlreadyConnected, Denied)
     // Sharing states
     NewBlock(usize),
     /// Broadcast new block when minted
@@ -303,7 +302,6 @@ fn broadcast(pools: ConnectionPool, message: ProtocolMessage) -> PeerResult<()> 
 ///Start the network server by binding to given address
 // If listener cannot be binded, let the program crash.
 fn start_listener<T: 'static + ToSocketAddrs + Sync + Send>(
-    capacity: usize,
     pools: ConnectionPool,
     conn_adder: mpsc::Sender<SocketAddr>,
     address: T,
@@ -317,12 +315,14 @@ fn start_listener<T: 'static + ToSocketAddrs + Sync + Send>(
         thread::spawn(move || {
             let stream = stream.unwrap();
             if let Ok(Request(socket_addr)) = read_message(&stream) {
-                let mut conn_pools = conn_pools.lock().unwrap();
-                if !conn_pools.contains_key(&socket_addr) && conn_pools.len() < capacity {
-                    send_message(&stream, Accepted).unwrap();
-                    let conn =
-                        Connection::connect_stream(socket_addr.to_owned(), stream, conn_pools_c, conn_adder_c).unwrap();
-                    conn_pools.insert(socket_addr, conn);
+                match is_connection_acceptable(&socket_addr, &conn_pools) {
+                    None => {
+                        send_message(&stream, Accepted).unwrap();
+                        let conn =
+                            Connection::connect_stream(socket_addr.to_owned(), stream, conn_pools_c, conn_adder_c).unwrap();
+                        conn_pools.lock().unwrap().insert(socket_addr, conn);
+                    },
+                    Some(err_message) => send_message(&stream, err_message).unwrap(),
                 }
             } else {
                 send_message(&stream, Denied).unwrap();
@@ -340,9 +340,6 @@ fn handle_recv_message(
     if let Ok(recv_message) = read_message(&stream) {
         match recv_message {
             Ping => send_message(&stream, Pong)?,
-            Request(socket_addr) => {
-                conn_sender.send(socket_addr)?; // Handling!
-            }
             NewBlock(_num) => {
                 //check if new number is bigger
                 //if yes, update it and broadcast to the others
@@ -402,7 +399,6 @@ fn read_message(stream: &TcpStream) -> PeerResult<ProtocolMessage> {
 
 fn start_connection_registerer(
     my_addr: SocketAddr,
-    capacity: usize,
     conn_pool: ConnectionPool,
 ) -> PeerResult<(Arc<AtomicBool>, JoinHandle<()>, mpsc::Sender<SocketAddr>)> {
     let (tx, rx) = mpsc::channel::<SocketAddr>();
@@ -412,13 +408,12 @@ fn start_connection_registerer(
     let handle = thread::spawn(move || {
         while !is_done_c.load(Ordering::Relaxed) {
             let socket_addr = rx.recv().unwrap();
-            let mut conn_pool_locked = conn_pool.lock().unwrap();
-            if !conn_pool_locked.contains_key(&socket_addr) && conn_pool_locked.len() < capacity {
+            if is_connection_acceptable(&socket_addr, &conn_pool).is_none() {
                 if let Ok(conn) =
                     Connection::connect(my_addr, socket_addr, Arc::clone(&conn_pool), tx.clone())
                 {
                     println!("New connection: {:?}", &conn.address);
-                    conn_pool_locked.insert(conn.address, conn);
+                    conn_pool.lock().unwrap().insert(conn.address, conn);
                 };
             }
         }
@@ -451,4 +446,15 @@ fn start_messenger(
     });
 
     Ok((messenger_done, messender_handle))
+}
+
+fn is_connection_acceptable(socket_addr: &SocketAddr, conn_pool: &ConnectionPool) -> Option<ProtocolMessage> {
+    let conn_pool = conn_pool.lock().unwrap();
+    if conn_pool.contains_key(socket_addr) {
+        return Some(AlreadyConnected)
+    } else if conn_pool.len() >= conn_pool.capacity() {
+        return Some(CapacityReached)
+    } else {
+        return None
+    }
 }
