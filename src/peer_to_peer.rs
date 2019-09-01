@@ -18,11 +18,6 @@ type ConnectionPool = Arc<Mutex<HashMap<SocketAddr, Connection>>>;
 
 type PeerResult<T> = Result<T, Box<dyn error::Error>>;
 
-pub struct ConnectionInitiater {
-    server_address: SocketAddr,
-    pools: ConnectionPool,
-}
-
 ///Connection manager is responsible of managing listener.
 ///It also should provide interface that other modules can use
 pub struct ConnectionManager {
@@ -85,8 +80,22 @@ impl ConnectionManager {
     }
 
     pub fn start(&mut self) {
+
+        // Todo: drop self afterwards
+        let listener_pool = Arc::clone(&self.pools);
+        let server_address = self.server_address;
+        let addr_sender = self.addr_sender.to_owned();
+        let _listener_handle = thread::spawn(move || {
+            start_listener(
+                listener_pool,
+                addr_sender,
+                server_address,
+            ); 
+        });
+
         let pool = Arc::clone(&self.pools);
         let server_address = self.server_address;
+        let msg_done = self.messenger_done.clone();
         ctrlc::set_handler(move || {
             broadcast(&pool, Exiting(server_address)).unwrap();
             // Clear the connection pool
@@ -94,16 +103,14 @@ impl ConnectionManager {
             // it from pool
             pool.lock().unwrap().clear();
             println!("Exiting");
+            msg_done.store(true, Ordering::Relaxed);
             process::exit(0);
         })
         .expect("Error setting Ctrl-C handler");
 
-        // Todo: drop self afterwards
-        start_listener(
-            Arc::clone(&self.pools),
-            self.addr_sender.to_owned(),
-            self.server_address,
-        );
+        if let Some(thread) = self.messenger_handle.take() {
+            thread.join().unwrap();
+        }
     }
 }
 
