@@ -1,3 +1,4 @@
+use ctrlc;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::HashMap;
@@ -6,6 +7,7 @@ use std::fmt;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -33,7 +35,7 @@ impl Drop for ConnectionManager {
     fn drop(&mut self) {
         println!("Dropping");
 
-        self.broadcast(Exit).unwrap();
+        self.broadcast(Exiting).unwrap();
 
         //Drop all the pool
         for (_socket, conn) in self.pools.lock().unwrap().iter_mut() {
@@ -58,6 +60,94 @@ impl Drop for ConnectionManager {
             thread.join().unwrap();
         }
     }
+}
+
+///Start the network server by binding to given address
+// If listener cannot be binded, let the program crash.
+fn start_listener<T: 'static + ToSocketAddrs + Sync + Send>(
+    pools: ConnectionPool,
+    conn_adder: mpsc::Sender<SocketAddr>,
+    address: T,
+) {
+    let listener = TcpListener::bind(address).unwrap();
+    // accept connections and process them
+    for stream in listener.incoming() {
+        let conn_pools = Arc::clone(&pools);
+        let conn_adder_c = conn_adder.clone();
+        let conn_pools_c = Arc::clone(&pools);
+        thread::spawn(move || {
+            let stream = stream.unwrap();
+            if let Ok(Request(socket_addr)) = read_message(&stream) {
+                match is_connection_acceptable(&socket_addr, &conn_pools) {
+                    None => {
+                        send_message(&stream, Accepted).unwrap();
+                        let conn = Connection::connect_stream(
+                            socket_addr.to_owned(),
+                            stream,
+                            conn_pools_c,
+                            conn_adder_c,
+                        )
+                        .unwrap();
+                        conn_pools.lock().unwrap().insert(socket_addr, conn);
+                    }
+                    Some(err_message) => send_message(&stream, err_message).unwrap(),
+                }
+            } else {
+                send_message(&stream, Denied).unwrap();
+            }
+        });
+    }
+}
+
+fn start_messenger(
+    conn_pool: ConnectionPool,
+    capacity: usize,
+    my_address: SocketAddr,
+) -> PeerResult<(Arc<AtomicBool>, JoinHandle<()>)> {
+    let messenger_done = Arc::new(AtomicBool::new(false));
+    let messenger_done_c = Arc::clone(&messenger_done);
+    let messender_handle = thread::spawn(move || {
+        while !messenger_done_c.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_secs(10));
+            let conn_pool = Arc::clone(&conn_pool);
+            let conn_pool_c = Arc::clone(&conn_pool);
+            // perform clean up (remove dead connection)
+            let conn_pool = conn_pool.lock().unwrap();
+            let conn_len = conn_pool.len();
+            if conn_len < capacity {
+                let conn_addr: Vec<SocketAddr> = conn_pool.keys().map(|k| k.to_owned()).collect();
+                let ask_message = AskPeer(my_address, conn_addr, conn_len);
+                drop(conn_pool);
+                broadcast(&conn_pool_c, ask_message).unwrap();
+            }
+        }
+    });
+
+    Ok((messenger_done, messender_handle))
+}
+
+fn start_connection_registerer(
+    my_addr: SocketAddr,
+    conn_pool: ConnectionPool,
+) -> PeerResult<(Arc<AtomicBool>, JoinHandle<()>, mpsc::Sender<SocketAddr>)> {
+    let (tx, rx) = mpsc::channel::<SocketAddr>();
+    let is_done = Arc::new(AtomicBool::new(false));
+    let is_done_c = Arc::clone(&is_done);
+    let tx_c = tx.clone();
+    let handle = thread::spawn(move || {
+        while !is_done_c.load(Ordering::Relaxed) {
+            let socket_addr = rx.recv().unwrap();
+            if is_connection_acceptable(&socket_addr, &conn_pool).is_none() {
+                if let Ok(conn) =
+                    Connection::connect(my_addr, socket_addr, Arc::clone(&conn_pool), tx.clone())
+                {
+                    println!("New connection: {:?}", &conn.address);
+                    conn_pool.lock().unwrap().insert(conn.address, conn);
+                };
+            }
+        }
+    });
+    Ok((is_done, handle, tx_c))
 }
 
 #[derive(Debug)]
@@ -128,17 +218,28 @@ impl ConnectionManager {
     /// Broadcast `ProtocolMessage` to the known peer
     pub fn broadcast(&self, message: ProtocolMessage) -> PeerResult<()> {
         assert!(self.started, "Please start the server");
-        broadcast(Arc::clone(&self.pools), message)
+        broadcast(&self.pools, message)
     }
 
     pub fn start(&mut self) {
+        let pool = Arc::clone(&self.pools);
+        ctrlc::set_handler(move || {
+            broadcast(&pool, Exiting).unwrap();
+            // Clear the connection pool
+            // This will signal all the connected nodes that they should remove
+            // it from pool
+            pool.lock().unwrap().clear();
+            println!("Exiting");
+            process::exit(0);
+        })
+        .expect("Error setting Ctrl-C handler");
+
         // Todo: drop self afterwards
         start_listener(
             Arc::clone(&self.pools),
             self.addr_sender.to_owned(),
             self.server_address,
         );
-        // drop(self); Doesn't work
     }
 }
 
@@ -166,7 +267,7 @@ pub enum ProtocolMessage {
     /// Exchange information about peers
     AskPeer(SocketAddr, Vec<SocketAddr>, usize), // Address are connnected
     ReplyPeer(Vec<SocketAddr>, usize),
-    Exit,
+    Exiting,
 }
 
 ///Connection handles message handling between peers
@@ -204,12 +305,13 @@ impl Connection {
             while !send_done.load(Ordering::Relaxed) {
                 // Can you make it such that if any of the function fails,
                 // it does the same restore action?
-                let message = conn_receiver.recv().expect("Unable to receive message");
-                //If write fails due to broken pipe, close the threads
-                if send_message(&send_stream, message).is_err() {
-                    send_done.store(true, Ordering::Relaxed);
+                if let Ok(message) = conn_receiver.recv() {
+                    //If write fails due to broken pipe, close the threads
+                    if send_message(&send_stream, message).is_err() {
+                        send_done.store(true, Ordering::Relaxed);
+                    };
+                    send_stream.flush().expect("Unable to flush stream");
                 };
-                send_stream.flush().expect("Unable to flush stream");
             }
         });
 
@@ -260,23 +362,27 @@ impl Connection {
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        println!("Lost connection: {:?}", self.address);
-
         self.done.store(true, Ordering::Relaxed);
+        if let Some(sender) = self.conn_sender.take() {
+            drop(sender);
+        }
+
         if let Some(thread) = self.send_thread.take() {
             thread.join().expect("Unable to close send_thread");
         }
+        println!("Send thread down");
 
         if let Some(thread) = self.recv_thread.take() {
             thread.join().expect("Unable to close recv_thread");
         }
+        println!("Rec thread down");
 
         if self.stream.shutdown(Shutdown::Both).is_err() {};
     }
 }
 
 /// Broadcast given `message` to the known peers
-fn broadcast(pools: ConnectionPool, message: ProtocolMessage) -> PeerResult<()> {
+fn broadcast(pools: &ConnectionPool, message: ProtocolMessage) -> PeerResult<()> {
     let mut pools = pools.lock().unwrap();
     // If any of the `send` fails, store the `SocketAddr` here so it can later be
     // removed.
@@ -295,43 +401,6 @@ fn broadcast(pools: ConnectionPool, message: ProtocolMessage) -> PeerResult<()> 
     }
 
     Ok(())
-}
-
-///Start the network server by binding to given address
-// If listener cannot be binded, let the program crash.
-fn start_listener<T: 'static + ToSocketAddrs + Sync + Send>(
-    pools: ConnectionPool,
-    conn_adder: mpsc::Sender<SocketAddr>,
-    address: T,
-) {
-    let listener = TcpListener::bind(address).unwrap();
-    // accept connections and process them
-    for stream in listener.incoming() {
-        let conn_pools = Arc::clone(&pools);
-        let conn_adder_c = conn_adder.clone();
-        let conn_pools_c = Arc::clone(&pools);
-        thread::spawn(move || {
-            let stream = stream.unwrap();
-            if let Ok(Request(socket_addr)) = read_message(&stream) {
-                match is_connection_acceptable(&socket_addr, &conn_pools) {
-                    None => {
-                        send_message(&stream, Accepted).unwrap();
-                        let conn = Connection::connect_stream(
-                            socket_addr.to_owned(),
-                            stream,
-                            conn_pools_c,
-                            conn_adder_c,
-                        )
-                        .unwrap();
-                        conn_pools.lock().unwrap().insert(socket_addr, conn);
-                    }
-                    Some(err_message) => send_message(&stream, err_message).unwrap(),
-                }
-            } else {
-                send_message(&stream, Denied).unwrap();
-            }
-        });
-    }
 }
 
 ///Read messages from the `TcpStream` and handle them accordingly
@@ -398,57 +467,6 @@ fn read_message(stream: &TcpStream) -> PeerResult<ProtocolMessage> {
     let recv_message: ProtocolMessage = serde_json::from_str(&buffer)?;
     println!("Got message: {:?}", recv_message);
     Ok(recv_message)
-}
-
-fn start_connection_registerer(
-    my_addr: SocketAddr,
-    conn_pool: ConnectionPool,
-) -> PeerResult<(Arc<AtomicBool>, JoinHandle<()>, mpsc::Sender<SocketAddr>)> {
-    let (tx, rx) = mpsc::channel::<SocketAddr>();
-    let is_done = Arc::new(AtomicBool::new(false));
-    let is_done_c = Arc::clone(&is_done);
-    let tx_c = tx.clone();
-    let handle = thread::spawn(move || {
-        while !is_done_c.load(Ordering::Relaxed) {
-            let socket_addr = rx.recv().unwrap();
-            if is_connection_acceptable(&socket_addr, &conn_pool).is_none() {
-                if let Ok(conn) =
-                    Connection::connect(my_addr, socket_addr, Arc::clone(&conn_pool), tx.clone())
-                {
-                    println!("New connection: {:?}", &conn.address);
-                    conn_pool.lock().unwrap().insert(conn.address, conn);
-                };
-            }
-        }
-    });
-    Ok((is_done, handle, tx_c))
-}
-
-fn start_messenger(
-    conn_pool: ConnectionPool,
-    capacity: usize,
-    my_address: SocketAddr,
-) -> PeerResult<(Arc<AtomicBool>, JoinHandle<()>)> {
-    let messenger_done = Arc::new(AtomicBool::new(false));
-    let messenger_done_c = Arc::clone(&messenger_done);
-    let messender_handle = thread::spawn(move || {
-        while !messenger_done_c.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_secs(10));
-            let conn_pool = Arc::clone(&conn_pool);
-            let conn_pool_c = Arc::clone(&conn_pool);
-            // perform clean up (remove dead connection)
-            let conn_pool = conn_pool.lock().unwrap();
-            let conn_len = conn_pool.len();
-            if conn_len < capacity {
-                let conn_addr: Vec<SocketAddr> = conn_pool.keys().map(|k| k.to_owned()).collect();
-                let ask_message = AskPeer(my_address, conn_addr, conn_len);
-                drop(conn_pool);
-                broadcast(conn_pool_c, ask_message).unwrap();
-            }
-        }
-    });
-
-    Ok((messenger_done, messender_handle))
 }
 
 //This can be tested!
