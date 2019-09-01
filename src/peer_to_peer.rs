@@ -35,7 +35,7 @@ impl Drop for ConnectionManager {
     fn drop(&mut self) {
         println!("Dropping");
 
-        self.broadcast(Exiting).unwrap();
+        self.broadcast(Exiting(self.server_address)).unwrap();
 
         //Drop all the pool
         for (_socket, conn) in self.pools.lock().unwrap().iter_mut() {
@@ -223,8 +223,9 @@ impl ConnectionManager {
 
     pub fn start(&mut self) {
         let pool = Arc::clone(&self.pools);
+        let server_address = self.server_address;
         ctrlc::set_handler(move || {
-            broadcast(&pool, Exiting).unwrap();
+            broadcast(&pool, Exiting(server_address)).unwrap();
             // Clear the connection pool
             // This will signal all the connected nodes that they should remove
             // it from pool
@@ -267,8 +268,35 @@ pub enum ProtocolMessage {
     /// Exchange information about peers
     AskPeer(SocketAddr, Vec<SocketAddr>, usize), // Address are connnected
     ReplyPeer(Vec<SocketAddr>, usize),
-    Exiting,
+    Exiting(SocketAddr),
 }
+
+
+// Want to make these functions generic
+
+///Send `ProtocolMessage` the given stream
+fn send_message(stream: &TcpStream, message: ProtocolMessage) -> PeerResult<()> {
+    let peer_addr = stream.peer_addr().unwrap();
+    println!("Sending message to: {:?},  {:?}", peer_addr, message);
+    let mut stream_clone = stream.try_clone()?;
+    serde_json::to_writer(stream, &message)?;
+    stream_clone.write_all(b"\n")?;
+    stream_clone.flush()?;
+    Ok(())
+}
+
+fn read_message(stream: &TcpStream) -> PeerResult<ProtocolMessage> {
+    let mut reader = BufReader::new(stream);
+    let mut buffer = String::new();
+    reader.read_line(&mut buffer)?;
+    let recv_message: ProtocolMessage = serde_json::from_str(&buffer)?;
+    println!("Got message: {:?}", recv_message);
+    Ok(recv_message)
+}
+
+// -----------------------------------------------------------------------------
+// Connection
+// -----------------------------------------------------------------------------
 
 ///Connection handles message handling between peers
 ///It will start send and recv thread once instantiated.
@@ -307,7 +335,9 @@ impl Connection {
                 // it does the same restore action?
                 if let Ok(message) = conn_receiver.recv() {
                     //If write fails due to broken pipe, close the threads
+                    // Make it cleaner
                     if send_message(&send_stream, message).is_err() {
+                        drop(&send_stream);
                         send_done.store(true, Ordering::Relaxed);
                     };
                     send_stream.flush().expect("Unable to flush stream");
@@ -370,12 +400,10 @@ impl Drop for Connection {
         if let Some(thread) = self.send_thread.take() {
             thread.join().expect("Unable to close send_thread");
         }
-        println!("Send thread down");
 
         if let Some(thread) = self.recv_thread.take() {
             thread.join().expect("Unable to close recv_thread");
         }
-        println!("Rec thread down");
 
         if self.stream.shutdown(Shutdown::Both).is_err() {};
     }
@@ -443,30 +471,12 @@ fn handle_recv_message(
                 let msg = ReplyPeer(new_addresses, addr_len);
                 send_message(stream, msg).unwrap();
             }
-            _ => {}
+            Exiting(socket_addr) => {
+            },
+            _ => {},
         }
     };
     Ok(())
-}
-
-///Send `ProtocolMessage` the given stream
-fn send_message(stream: &TcpStream, message: ProtocolMessage) -> PeerResult<()> {
-    let peer_addr = stream.peer_addr().unwrap();
-    println!("Sending message to: {:?},  {:?}", peer_addr, message);
-    let mut stream_clone = stream.try_clone()?;
-    serde_json::to_writer(stream, &message)?;
-    stream_clone.write_all(b"\n")?;
-    stream_clone.flush()?;
-    Ok(())
-}
-
-fn read_message(stream: &TcpStream) -> PeerResult<ProtocolMessage> {
-    let mut reader = BufReader::new(stream);
-    let mut buffer = String::new();
-    reader.read_line(&mut buffer)?;
-    let recv_message: ProtocolMessage = serde_json::from_str(&buffer)?;
-    println!("Got message: {:?}", recv_message);
-    Ok(recv_message)
 }
 
 //This can be tested!
