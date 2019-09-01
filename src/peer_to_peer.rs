@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ pub use protocol_message::ProtocolMessage::{self, *};
 use protocol_message::{read_message, send_message};
 
 pub use connection::*;
-pub use util::{PeerError, PeerResult};
+pub use util::{PeerError, PeerResult, ChanMessage, MessageSender};
 
 ///Connection pool handling messages between peers
 
@@ -26,11 +26,10 @@ pub use util::{PeerError, PeerResult};
 pub struct ConnectionManager {
     server_address: SocketAddr,
     pools: ConnectionPool,
-    register_done: Arc<AtomicBool>,
     register_handle: Option<JoinHandle<()>>,
     messenger_done: Arc<AtomicBool>,
     messenger_handle: Option<JoinHandle<()>>,
-    addr_sender: mpsc::Sender<PoolMessage>,
+    addr_sender: MessageSender<PoolMessage>,
 }
 
 impl ConnectionManager {
@@ -47,7 +46,7 @@ impl ConnectionManager {
 
         // If start is not being called, main thread will die
         // Move these into start()
-        let (register_done, register_handle, addr_sender) =
+        let (register_handle, addr_sender) =
             start_pool_manager(server_address, Arc::clone(&pools)).unwrap();
 
         for address in addrs.into_iter() {
@@ -62,7 +61,6 @@ impl ConnectionManager {
         ConnectionManager {
             server_address,
             pools,
-            register_done,
             register_handle: Some(register_handle),
             messenger_done,
             messenger_handle: Some(messenger_handle),
@@ -117,7 +115,6 @@ impl Drop for ConnectionManager {
 
         //Drop all the pool
         for (_socket, conn) in self.pools.lock().unwrap().iter_mut() {
-            conn.done.store(true, Ordering::Relaxed);
             if let Some(thread) = conn.send_thread.take() {
                 thread.join().unwrap();
             }
@@ -126,8 +123,6 @@ impl Drop for ConnectionManager {
                 thread.join().unwrap();
             }
         }
-
-        self.register_done.store(true, Ordering::Relaxed);
 
         if let Some(thread) = self.register_handle.take() {
             thread.join().unwrap();
@@ -144,7 +139,7 @@ impl Drop for ConnectionManager {
 // If listener cannot be binded, let the program crash.
 fn start_listener(
     pools: ConnectionPool,
-    conn_sender: mpsc::Sender<PoolMessage>,
+    conn_sender: MessageSender<PoolMessage>,
     address: SocketAddr,
 ) {
     let listener = TcpListener::bind(address).unwrap();
@@ -165,13 +160,13 @@ fn start_listener(
                             conn_pools_c,
                             conn_sender_c,
                         )
-                        .unwrap();
-                        conn_pools.lock().unwrap().insert(socket_addr, conn);
+                        .expect("Unable to send message");
+                        conn_pools.lock().expect("Unable to lock pool").insert(socket_addr, conn);
                     }
-                    Some(err_message) => send_message(Some(&socket_addr), &stream, err_message).unwrap(),
+                    Some(err_message) => send_message(Some(&socket_addr), &stream, err_message).expect("Unable to send message"),
                 }
             } else {
-                send_message(None, &stream, Denied).unwrap();
+                send_message(None, &stream, Denied).expect("Unable to send message")
             }
         });
     }

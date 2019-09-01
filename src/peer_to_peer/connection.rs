@@ -1,7 +1,7 @@
 use std::io::prelude::*;
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -9,6 +9,8 @@ use super::connection_pool::{ConnectionPool, PoolMessage};
 use super::protocol_message::ProtocolMessage::{self, *};
 use super::protocol_message::{read_message, send_message};
 use super::util::*;
+
+use super::util::ChanMessage::*;
 
 ///Connection handles message handling between peers
 ///It will start send and recv thread once instantiated.
@@ -21,7 +23,7 @@ pub struct Connection {
     // Thread handle for receive operation
     pub recv_thread: Option<JoinHandle<()>>,
     // Used to send message to the peer
-    pub conn_sender: Option<mpsc::Sender<ProtocolMessage>>,
+    pub conn_sender: MessageSender<ProtocolMessage>,
     // Used to shutdown connection gracefully
     pub done: Arc<AtomicBool>,
 }
@@ -32,27 +34,32 @@ impl Connection {
         socket_addr: SocketAddr,
         stream: TcpStream,
         conn_pool: ConnectionPool,
-        conn_sender: mpsc::Sender<PoolMessage>,
+        conn_sender: MessageSender<PoolMessage>,
     ) -> PeerResult<Connection> {
         //Check if address aleady exists in the pool
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = channel();
         let done = Arc::new(AtomicBool::new(false));
 
         //Handles sending messages
         let send_done = Arc::clone(&done);
         let mut send_stream = stream.try_clone()?;
         let send_thread = thread::spawn(move || {
-            while !send_done.load(Ordering::Relaxed) {
+            loop {
                 // Can you make it such that if any of the function fails,
                 // it does the same restore action?
                 if let Ok(message) = rx.recv() {
-                    //If write fails due to broken pipe, close the threads
-                    // Make it cleaner
-                    if send_message(Some(&socket_addr), &send_stream, message).is_err() {
-                        drop(&send_stream);
-                        send_done.store(true, Ordering::Relaxed);
-                    };
-                    send_stream.flush().expect("Unable to flush stream");
+                    match message {
+                        Message(msg) => {
+                            //If write fails due to broken pipe, close the threads
+                            // Make it cleaner
+                            if send_message(Some(&socket_addr), &send_stream, msg).is_err() {
+                                drop(&send_stream);
+                                send_done.store(true, Ordering::Relaxed);
+                            };
+                            send_stream.flush().expect("Unable to flush stream");
+                        }
+                        Terminate => break,
+                    }
                 };
             }
         });
@@ -76,7 +83,7 @@ impl Connection {
             stream,
             send_thread: Some(send_thread),
             recv_thread: Some(recv_thread),
-            conn_sender: Some(tx),
+            conn_sender: tx,
             done,
         };
 
@@ -90,7 +97,7 @@ impl Connection {
         my_address: SocketAddr,
         address: SocketAddr,
         conn_pool: ConnectionPool,
-        conn_sender: mpsc::Sender<PoolMessage>,
+        conn_sender: MessageSender<PoolMessage>,
     ) -> PeerResult<Connection> {
         let stream = TcpStream::connect(address)?;
         send_message(None, &stream, Request(my_address))?;
@@ -105,10 +112,8 @@ impl Connection {
 
 impl Drop for Connection {
     fn drop(&mut self) {
+        self.conn_sender.send_terminate().expect("Unable to send terminate message");
         self.done.store(true, Ordering::Relaxed);
-        if let Some(sender) = self.conn_sender.take() {
-            drop(sender);
-        }
 
         if let Some(thread) = self.send_thread.take() {
             thread.join().expect("Unable to close send_thread");
@@ -130,10 +135,8 @@ pub fn broadcast(pools: &ConnectionPool, message: ProtocolMessage) -> PeerResult
     let mut failed_addr = Vec::new();
 
     for (socket_addr, conn) in pools.iter_mut() {
-        if let Some(sender) = &conn.conn_sender {
-            if sender.send(message.to_owned()).is_err() {
-                failed_addr.push(socket_addr.to_owned());
-            };
+        if conn.conn_sender.send(message.to_owned()).is_err() {
+            failed_addr.push(socket_addr.to_owned());
         };
     }
 
@@ -150,7 +153,7 @@ pub fn broadcast(pools: &ConnectionPool, message: ProtocolMessage) -> PeerResult
 pub fn handle_recv_message(
     stream: &TcpStream,
     pool: ConnectionPool,
-    conn_sender: mpsc::Sender<PoolMessage>,
+    conn_sender: MessageSender<PoolMessage>,
 ) -> PeerResult<()> {
     if let Ok(recv_message) = read_message(&stream) {
         match recv_message {

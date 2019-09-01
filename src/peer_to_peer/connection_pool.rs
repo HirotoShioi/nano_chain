@@ -1,32 +1,31 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use super::connection::{is_connection_acceptable, Connection};
 use super::util::*;
+use super::util::ChanMessage::*;
 
 pub type ConnectionPool = Arc<Mutex<HashMap<SocketAddr, Connection>>>;
 
 pub enum PoolMessage {
     Add(SocketAddr),
     Delete(SocketAddr),
-    Terminate,
 }
+
+use super::connection_pool::PoolMessage::*;
 
 pub fn start_pool_manager(
     my_addr: SocketAddr,
     conn_pool: ConnectionPool,
-) -> PeerResult<(Arc<AtomicBool>, JoinHandle<()>, mpsc::Sender<PoolMessage>)> {
-    let (tx, rx) = mpsc::channel::<PoolMessage>();
-    let is_done = Arc::new(AtomicBool::new(false));
-    let is_done_c = Arc::clone(&is_done);
+) -> PeerResult<(JoinHandle<()>, MessageSender<PoolMessage>)> {
+    let (tx, rx) = channel::<PoolMessage>();
     let tx_c = tx.clone();
     let handle = thread::spawn(move || {
-        while !is_done_c.load(Ordering::Relaxed) {
+        loop {
             match rx.recv().unwrap() {
-                PoolMessage::Add(socket_addr) => {
+                Message(Add(socket_addr)) => {
                     match is_connection_acceptable(&socket_addr, &conn_pool) {
                         None => {
                             if let Ok(conn) = Connection::connect(
@@ -41,15 +40,13 @@ pub fn start_pool_manager(
                         Some(reason) => println!("Connection denied: {:?}", reason),
                     }
                 }
-                PoolMessage::Delete(socket_addr) => {
+                Message(Delete(socket_addr)) => {
                     println!("Removing address: {:?}", &socket_addr);
                     conn_pool.lock().unwrap().remove(&socket_addr);
                 }
-                PoolMessage::Terminate => {
-                    println!("Terminating");
-                }
+                Terminate => break,
             }
         }
     });
-    Ok((is_done, handle, tx_c))
+    Ok((handle, tx_c))
 }
