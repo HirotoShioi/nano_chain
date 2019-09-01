@@ -18,6 +18,11 @@ type ConnectionPool = Arc<Mutex<HashMap<SocketAddr, Connection>>>;
 
 type PeerResult<T> = Result<T, Box<dyn error::Error>>;
 
+pub struct ConnectionInitiater {
+    server_address: SocketAddr,
+    pools: ConnectionPool,
+}
+
 ///Connection manager is responsible of managing listener.
 ///It also should provide interface that other modules can use
 pub struct ConnectionManager {
@@ -27,8 +32,79 @@ pub struct ConnectionManager {
     register_handle: Option<JoinHandle<()>>,
     messenger_done: Arc<AtomicBool>,
     messenger_handle: Option<JoinHandle<()>>,
-    addr_sender: mpsc::Sender<SocketAddr>,
-    started: bool,
+    addr_sender: mpsc::Sender<PoolMessage>,
+}
+
+impl ConnectionManager {
+    /// Create an instance of `ConnectionManager`
+    ///
+    /// You can provide vector of addresses which can be used to connect to the other
+    /// nodes initially as well as launching server by providin `server_address`
+    pub fn new(
+        addrs: Vec<SocketAddr>,
+        server_address: SocketAddr,
+        capacity: usize,
+    ) -> ConnectionManager {
+        let pools = Arc::new(Mutex::new(HashMap::with_capacity(capacity)));
+
+        // If start is not being called, main thread will die
+        // Move these into start()
+        let (register_done, register_handle, addr_sender) =
+            start_pool_manager(server_address, Arc::clone(&pools)).unwrap();
+
+        for address in addrs.into_iter() {
+            addr_sender.send(PoolMessage::Add(address)).unwrap();
+        }
+
+        //Spawn thread for proactive messaging
+        let (messenger_done, messenger_handle) =
+            start_messenger(Arc::clone(&pools), capacity, server_address).unwrap();
+        //
+
+        ConnectionManager {
+            server_address,
+            pools,
+            register_done,
+            register_handle: Some(register_handle),
+            messenger_done,
+            messenger_handle: Some(messenger_handle),
+            addr_sender,
+        }
+    }
+
+    /// Add new connection to the pool
+    pub fn add(&mut self, address: &str) -> Result<(), PoolError> {
+        let socket_addr = address.parse().unwrap();
+        self.addr_sender.send(PoolMessage::Add(socket_addr)).unwrap();
+        Ok(())
+    }
+
+    /// Broadcast `ProtocolMessage` to the known peer
+    pub fn broadcast(&self, message: ProtocolMessage) -> PeerResult<()> {
+        broadcast(&self.pools, message)
+    }
+
+    pub fn start(&mut self) {
+        let pool = Arc::clone(&self.pools);
+        let server_address = self.server_address;
+        ctrlc::set_handler(move || {
+            broadcast(&pool, Exiting(server_address)).unwrap();
+            // Clear the connection pool
+            // This will signal all the connected nodes that they should remove
+            // it from pool
+            pool.lock().unwrap().clear();
+            println!("Exiting");
+            process::exit(0);
+        })
+        .expect("Error setting Ctrl-C handler");
+
+        // Todo: drop self afterwards
+        start_listener(
+            Arc::clone(&self.pools),
+            self.addr_sender.to_owned(),
+            self.server_address,
+        );
+    }
 }
 
 impl Drop for ConnectionManager {
@@ -66,7 +142,7 @@ impl Drop for ConnectionManager {
 // If listener cannot be binded, let the program crash.
 fn start_listener<T: 'static + ToSocketAddrs + Sync + Send>(
     pools: ConnectionPool,
-    conn_adder: mpsc::Sender<SocketAddr>,
+    conn_adder: mpsc::Sender<PoolMessage>,
     address: T,
 ) {
     let listener = TcpListener::bind(address).unwrap();
@@ -126,24 +202,39 @@ fn start_messenger(
     Ok((messenger_done, messender_handle))
 }
 
-fn start_connection_registerer(
+enum PoolMessage {
+    Add(SocketAddr),
+    Delete(SocketAddr),
+    Terminate,
+}
+
+fn start_pool_manager(
     my_addr: SocketAddr,
     conn_pool: ConnectionPool,
-) -> PeerResult<(Arc<AtomicBool>, JoinHandle<()>, mpsc::Sender<SocketAddr>)> {
-    let (tx, rx) = mpsc::channel::<SocketAddr>();
+) -> PeerResult<(Arc<AtomicBool>, JoinHandle<()>, mpsc::Sender<PoolMessage>)> {
+    let (tx, rx) = mpsc::channel::<PoolMessage>();
     let is_done = Arc::new(AtomicBool::new(false));
     let is_done_c = Arc::clone(&is_done);
     let tx_c = tx.clone();
     let handle = thread::spawn(move || {
         while !is_done_c.load(Ordering::Relaxed) {
-            let socket_addr = rx.recv().unwrap();
-            if is_connection_acceptable(&socket_addr, &conn_pool).is_none() {
-                if let Ok(conn) =
-                    Connection::connect(my_addr, socket_addr, Arc::clone(&conn_pool), tx.clone())
-                {
-                    println!("New connection: {:?}", &conn.address);
-                    conn_pool.lock().unwrap().insert(conn.address, conn);
-                };
+            match rx.recv().unwrap() {
+                PoolMessage::Add(socket_addr) => {
+                    if is_connection_acceptable(&socket_addr, &conn_pool).is_none() {
+                        if let Ok(conn) =
+                            Connection::connect(my_addr, socket_addr, Arc::clone(&conn_pool), tx.clone())
+                        {
+                            conn_pool.lock().unwrap().insert(conn.address, conn);
+                        };
+                    }
+                }
+                PoolMessage::Delete(socket_addr) => {
+                    println!("Removing address: {:?}", &socket_addr);
+                    conn_pool.lock().unwrap().remove(&socket_addr);
+                }
+                PoolMessage::Terminate => {
+                    println!("Terminating");
+                },
             }
         }
     });
@@ -173,76 +264,6 @@ impl fmt::Display for PoolError {
 }
 
 impl error::Error for PoolError {}
-
-impl ConnectionManager {
-    /// Create an instance of `ConnectionManager`
-    ///
-    /// You can provide vector of addresses which can be used to connect to the other
-    /// nodes initially as well as launching server by providin `server_address`
-    pub fn new(
-        addrs: Vec<SocketAddr>,
-        server_address: SocketAddr,
-        capacity: usize,
-    ) -> ConnectionManager {
-        let pools = Arc::new(Mutex::new(HashMap::with_capacity(capacity)));
-        let (register_done, register_handle, addr_sender) =
-            start_connection_registerer(server_address, Arc::clone(&pools)).unwrap();
-
-        for address in addrs.into_iter() {
-            addr_sender.send(address).unwrap();
-        }
-
-        //Spawn thread for proactive messaging
-        let (messenger_done, messenger_handle) =
-            start_messenger(Arc::clone(&pools), capacity, server_address).unwrap();
-
-        ConnectionManager {
-            server_address,
-            pools,
-            register_done,
-            register_handle: Some(register_handle),
-            messenger_done,
-            messenger_handle: Some(messenger_handle),
-            addr_sender,
-            started: false,
-        }
-    }
-
-    /// Add new connection to the pool
-    pub fn add(&mut self, address: &str) -> Result<(), PoolError> {
-        let socket_addr = address.parse().unwrap();
-        self.addr_sender.send(socket_addr).unwrap();
-        Ok(())
-    }
-
-    /// Broadcast `ProtocolMessage` to the known peer
-    pub fn broadcast(&self, message: ProtocolMessage) -> PeerResult<()> {
-        assert!(self.started, "Please start the server");
-        broadcast(&self.pools, message)
-    }
-
-    pub fn start(&mut self) {
-        let pool = Arc::clone(&self.pools);
-        let server_address = self.server_address;
-        ctrlc::set_handler(move || {
-            broadcast(&pool, Exiting(server_address)).unwrap();
-            // Clear the connection pool
-            // This will signal all the connected nodes that they should remove
-            // it from pool
-            pool.lock().unwrap().clear();
-            println!("Exiting");
-            process::exit(0);
-        })
-        .expect("Error setting Ctrl-C handler");
-
-        // Todo: drop self afterwards
-        start_listener(
-            Arc::clone(&self.pools),
-            self.addr_sender.to_owned(),
-            self.server_address,
-        );
-    }
-}
 
 //------------------------------------------------------------------------------
 // Protocol
@@ -320,7 +341,7 @@ impl Connection {
         socket_addr: SocketAddr,
         stream: TcpStream,
         conn_pool: ConnectionPool,
-        conn_adder: mpsc::Sender<SocketAddr>,
+        conn_adder: mpsc::Sender<PoolMessage>,
     ) -> PeerResult<Connection> {
         //Check if address aleady exists in the pool
         let (conn_sender, conn_receiver) = mpsc::channel();
@@ -368,6 +389,7 @@ impl Connection {
             done,
         };
 
+        println!("New connection: {:?}", &socket_addr);
         Ok(conn)
     }
 
@@ -377,7 +399,7 @@ impl Connection {
         my_address: SocketAddr,
         address: SocketAddr,
         conn_pool: ConnectionPool,
-        conn_adder: mpsc::Sender<SocketAddr>,
+        conn_adder: mpsc::Sender<PoolMessage>,
     ) -> PeerResult<Connection> {
         let stream = TcpStream::connect(address)?;
         send_message(&stream, Request(my_address))?;
@@ -423,7 +445,9 @@ fn broadcast(pools: &ConnectionPool, message: ProtocolMessage) -> PeerResult<()>
             };
         };
     }
-
+    
+    //Remove this
+    //Use PoolMessage::Delete instead
     for socket_addr in failed_addr.iter() {
         pools.remove(socket_addr);
     }
@@ -435,7 +459,7 @@ fn broadcast(pools: &ConnectionPool, message: ProtocolMessage) -> PeerResult<()>
 fn handle_recv_message(
     stream: &TcpStream,
     pool: ConnectionPool,
-    conn_sender: mpsc::Sender<SocketAddr>,
+    conn_sender: mpsc::Sender<PoolMessage>,
 ) -> PeerResult<()> {
     if let Ok(recv_message) = read_message(&stream) {
         match recv_message {
@@ -452,7 +476,7 @@ fn handle_recv_message(
                 socket_addresses.to_owned().truncate(size);
                 for socket_addr in socket_addresses {
                     // Registerer will handle filtering
-                    conn_sender.send(socket_addr)?;
+                    conn_sender.send(PoolMessage::Add(socket_addr))?;
                 }
             }
             AskPeer(their_address, their_known_address, _size) => {
@@ -472,6 +496,7 @@ fn handle_recv_message(
                 send_message(stream, msg).unwrap();
             }
             Exiting(socket_addr) => {
+                conn_sender.send(PoolMessage::Delete(socket_addr)).unwrap();
             },
             _ => {},
         }
