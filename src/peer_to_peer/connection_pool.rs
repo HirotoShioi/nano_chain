@@ -15,28 +15,6 @@ pub enum PoolMessage {
     Terminate,
 }
 
-#[derive(Debug)]
-pub enum PoolError {
-    NoPool,
-    FailedToCreateConnection,
-    UnableToConnect,
-    ConnectionDenied,
-}
-
-impl std::fmt::Display for PoolError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let msg = match self {
-            PoolError::NoPool => "No connection available",
-            PoolError::FailedToCreateConnection => "Failed to create connection",
-            PoolError::UnableToConnect => "Unable to connect to the peer",
-            PoolError::ConnectionDenied => "Connection request was rejected",
-        };
-        write!(f, "{}", msg)
-    }
-}
-
-impl std::error::Error for PoolError {}
-
 pub fn start_pool_manager(
     my_addr: SocketAddr,
     conn_pool: ConnectionPool,

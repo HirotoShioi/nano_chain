@@ -12,5 +12,5 @@ mod utxo;
 
 pub use blockchain::{Block, BlockChain};
 pub use node::Node;
-pub use peer_to_peer::{ConnectionManager, PoolError, ProtocolMessage};
+pub use peer_to_peer::{ConnectionManager, PeerError, ProtocolMessage};
 pub use utxo::{Transaction, TransactionError, UTXO};

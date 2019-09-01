@@ -1,6 +1,5 @@
 use ctrlc;
 use std::collections::HashMap;
-use std::error;
 use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,12 +12,12 @@ mod connection_pool;
 mod protocol_message;
 mod util;
 
-pub use connection_pool::{start_pool_manager, ConnectionPool, PoolError, PoolMessage};
+pub use connection_pool::{start_pool_manager, ConnectionPool, PoolMessage};
 pub use protocol_message::ProtocolMessage::{self, *};
 use protocol_message::{read_message, send_message};
 
 pub use connection::*;
-use util::PeerResult;
+pub use util::{PeerError, PeerResult};
 
 ///Connection pool handling messages between peers
 
@@ -145,14 +144,14 @@ impl Drop for ConnectionManager {
 // If listener cannot be binded, let the program crash.
 fn start_listener<T: 'static + ToSocketAddrs + Sync + Send>(
     pools: ConnectionPool,
-    conn_adder: mpsc::Sender<PoolMessage>,
+    conn_sender: mpsc::Sender<PoolMessage>,
     address: T,
 ) {
     let listener = TcpListener::bind(address).unwrap();
     // accept connections and process them
     for stream in listener.incoming() {
         let conn_pools = Arc::clone(&pools);
-        let conn_adder_c = conn_adder.clone();
+        let conn_sender_c = conn_sender.clone();
         let conn_pools_c = Arc::clone(&pools);
         thread::spawn(move || {
             let stream = stream.unwrap();
@@ -164,7 +163,7 @@ fn start_listener<T: 'static + ToSocketAddrs + Sync + Send>(
                             socket_addr.to_owned(),
                             stream,
                             conn_pools_c,
-                            conn_adder_c,
+                            conn_sender_c,
                         )
                         .unwrap();
                         conn_pools.lock().unwrap().insert(socket_addr, conn);

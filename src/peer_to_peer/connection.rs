@@ -5,7 +5,7 @@ use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use super::connection_pool::{ConnectionPool, PoolError, PoolMessage};
+use super::connection_pool::{ConnectionPool, PoolMessage};
 use super::protocol_message::ProtocolMessage::{self, *};
 use super::protocol_message::{read_message, send_message};
 use super::util::*;
@@ -32,10 +32,10 @@ impl Connection {
         socket_addr: SocketAddr,
         stream: TcpStream,
         conn_pool: ConnectionPool,
-        conn_adder: mpsc::Sender<PoolMessage>,
+        conn_sender: mpsc::Sender<PoolMessage>,
     ) -> PeerResult<Connection> {
         //Check if address aleady exists in the pool
-        let (conn_sender, conn_receiver) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         let done = Arc::new(AtomicBool::new(false));
 
         //Handles sending messages
@@ -45,7 +45,7 @@ impl Connection {
             while !send_done.load(Ordering::Relaxed) {
                 // Can you make it such that if any of the function fails,
                 // it does the same restore action?
-                if let Ok(message) = conn_receiver.recv() {
+                if let Ok(message) = rx.recv() {
                     //If write fails due to broken pipe, close the threads
                     // Make it cleaner
                     if send_message(&send_stream, message).is_err() {
@@ -63,7 +63,7 @@ impl Connection {
         recv_stream.set_read_timeout(Some(Duration::from_millis(200)))?;
         let recv_thread = thread::spawn(move || {
             while !read_done.load(Ordering::Relaxed) {
-                if handle_recv_message(&recv_stream, Arc::clone(&conn_pool), conn_adder.clone())
+                if handle_recv_message(&recv_stream, Arc::clone(&conn_pool), conn_sender.clone())
                     .is_ok()
                 {
                     recv_stream.flush().unwrap();
@@ -76,7 +76,7 @@ impl Connection {
             stream,
             send_thread: Some(send_thread),
             recv_thread: Some(recv_thread),
-            conn_sender: Some(conn_sender),
+            conn_sender: Some(tx),
             done,
         };
 
@@ -90,15 +90,15 @@ impl Connection {
         my_address: SocketAddr,
         address: SocketAddr,
         conn_pool: ConnectionPool,
-        conn_adder: mpsc::Sender<PoolMessage>,
+        conn_sender: mpsc::Sender<PoolMessage>,
     ) -> PeerResult<Connection> {
         let stream = TcpStream::connect(address)?;
         send_message(&stream, Request(my_address))?;
         if let Ok(Accepted) = read_message(&stream) {
-            let conn = Connection::connect_stream(address, stream, conn_pool, conn_adder).unwrap();
+            let conn = Connection::connect_stream(address, stream, conn_pool, conn_sender).unwrap();
             Ok(conn)
         } else {
-            Err(Box::new(PoolError::ConnectionDenied))
+            Err(Box::new(PeerError::ConnectionDenied))
         }
     }
 }

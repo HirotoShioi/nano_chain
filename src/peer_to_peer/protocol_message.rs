@@ -39,6 +39,7 @@ pub fn send_message(stream: &TcpStream, message: ProtocolMessage) -> PeerResult<
     Ok(())
 }
 
+///Send `ReadMessage` from given stream
 pub fn read_message(stream: &TcpStream) -> PeerResult<ProtocolMessage> {
     let mut reader = BufReader::new(stream);
     let mut buffer = String::new();
