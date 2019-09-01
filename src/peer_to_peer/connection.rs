@@ -48,7 +48,7 @@ impl Connection {
                 if let Ok(message) = rx.recv() {
                     //If write fails due to broken pipe, close the threads
                     // Make it cleaner
-                    if send_message(&send_stream, message).is_err() {
+                    if send_message(Some(&socket_addr), &send_stream, message).is_err() {
                         drop(&send_stream);
                         send_done.store(true, Ordering::Relaxed);
                     };
@@ -93,7 +93,7 @@ impl Connection {
         conn_sender: mpsc::Sender<PoolMessage>,
     ) -> PeerResult<Connection> {
         let stream = TcpStream::connect(address)?;
-        send_message(&stream, Request(my_address))?;
+        send_message(None, &stream, Request(my_address))?;
         if let Ok(Accepted) = read_message(&stream) {
             let conn = Connection::connect_stream(address, stream, conn_pool, conn_sender).unwrap();
             Ok(conn)
@@ -154,7 +154,7 @@ pub fn handle_recv_message(
 ) -> PeerResult<()> {
     if let Ok(recv_message) = read_message(&stream) {
         match recv_message {
-            Ping => send_message(&stream, Pong)?,
+            Ping => send_message(None, &stream, Pong)?,
             NewBlock(_num) => {
                 //check if new number is bigger
                 //if yes, update it and broadcast to the others
@@ -184,7 +184,7 @@ pub fn handle_recv_message(
 
                 let addr_len = new_addresses.len();
                 let msg = ReplyPeer(new_addresses, addr_len);
-                send_message(stream, msg).unwrap();
+                send_message(Some(&their_address), stream, msg).unwrap();
             }
             Exiting(socket_addr) => {
                 conn_sender.send(PoolMessage::Delete(socket_addr)).unwrap();
@@ -203,7 +203,8 @@ pub fn is_connection_acceptable(
     let conn_pool = conn_pool.lock().unwrap();
     if conn_pool.contains_key(socket_addr) {
         Some(AlreadyConnected)
-    } else if conn_pool.len() >= conn_pool.capacity() {
+    //Need to subtract 1 because capacity() return lowerbound
+    } else if conn_pool.len() >= conn_pool.capacity() -1 {
         Some(CapacityReached)
     } else {
         None

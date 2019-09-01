@@ -1,6 +1,6 @@
 use ctrlc;
 use std::collections::HashMap;
-use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
+use std::net::{SocketAddr, TcpListener};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -142,10 +142,10 @@ impl Drop for ConnectionManager {
 
 ///Start the network server by binding to given address
 // If listener cannot be binded, let the program crash.
-fn start_listener<T: 'static + ToSocketAddrs + Sync + Send>(
+fn start_listener(
     pools: ConnectionPool,
     conn_sender: mpsc::Sender<PoolMessage>,
-    address: T,
+    address: SocketAddr,
 ) {
     let listener = TcpListener::bind(address).unwrap();
     // accept connections and process them
@@ -158,7 +158,7 @@ fn start_listener<T: 'static + ToSocketAddrs + Sync + Send>(
             if let Ok(Request(socket_addr)) = read_message(&stream) {
                 match is_connection_acceptable(&socket_addr, &conn_pools) {
                     None => {
-                        send_message(&stream, Accepted).unwrap();
+                        send_message(Some(&socket_addr), &stream, Accepted).unwrap();
                         let conn = Connection::connect_stream(
                             socket_addr.to_owned(),
                             stream,
@@ -168,10 +168,10 @@ fn start_listener<T: 'static + ToSocketAddrs + Sync + Send>(
                         .unwrap();
                         conn_pools.lock().unwrap().insert(socket_addr, conn);
                     }
-                    Some(err_message) => send_message(&stream, err_message).unwrap(),
+                    Some(err_message) => send_message(Some(&socket_addr), &stream, err_message).unwrap(),
                 }
             } else {
-                send_message(&stream, Denied).unwrap();
+                send_message(None, &stream, Denied).unwrap();
             }
         });
     }

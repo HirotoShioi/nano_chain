@@ -29,9 +29,11 @@ pub enum ProtocolMessage {
 // Want to make these functions generic
 
 ///Send `ProtocolMessage` the given stream
-pub fn send_message(stream: &TcpStream, message: ProtocolMessage) -> PeerResult<()> {
-    let peer_addr = stream.peer_addr().unwrap();
-    println!("Sending message to: {:?},  {:?}", peer_addr, message);
+pub fn send_message(server_address: Option<&SocketAddr>, stream: &TcpStream, message: ProtocolMessage) -> PeerResult<()> {
+    match server_address {
+        Some(address) =>  println!("Sending message to: {:?},  {:?}", address, message),
+        None => println!("Sending message: {:?}", message)
+    };
     let mut stream_clone = stream.try_clone()?;
     serde_json::to_writer(stream, &message)?;
     stream_clone.write_all(b"\n")?;

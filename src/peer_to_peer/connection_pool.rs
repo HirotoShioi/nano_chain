@@ -27,15 +27,18 @@ pub fn start_pool_manager(
         while !is_done_c.load(Ordering::Relaxed) {
             match rx.recv().unwrap() {
                 PoolMessage::Add(socket_addr) => {
-                    if is_connection_acceptable(&socket_addr, &conn_pool).is_none() {
-                        if let Ok(conn) = Connection::connect(
-                            my_addr,
-                            socket_addr,
-                            Arc::clone(&conn_pool),
-                            tx.clone(),
-                        ) {
-                            conn_pool.lock().unwrap().insert(conn.address, conn);
-                        };
+                    match is_connection_acceptable(&socket_addr, &conn_pool) {
+                        None => {
+                            if let Ok(conn) = Connection::connect(
+                                my_addr,
+                                socket_addr,
+                                Arc::clone(&conn_pool),
+                                tx.clone(),
+                            ) {
+                                conn_pool.lock().unwrap().insert(conn.address, conn);
+                            };
+                        },
+                        Some(reason) => println!("Connection denied: {:?}", reason),
                     }
                 }
                 PoolMessage::Delete(socket_addr) => {
