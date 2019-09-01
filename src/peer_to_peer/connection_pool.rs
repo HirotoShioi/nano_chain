@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use super::connection::{is_connection_acceptable, Connection};
-use super::util::*;
 use super::util::ChanMessage::*;
+use super::util::*;
 
 pub type ConnectionPool = Arc<Mutex<HashMap<SocketAddr, Connection>>>;
 
@@ -22,30 +22,22 @@ pub fn start_pool_manager(
 ) -> PeerResult<(JoinHandle<()>, MessageSender<PoolMessage>)> {
     let (tx, rx) = channel::<PoolMessage>();
     let tx_c = tx.clone();
-    let handle = thread::spawn(move || {
-        loop {
-            match rx.recv().unwrap() {
-                Message(Add(socket_addr)) => {
-                    match is_connection_acceptable(&socket_addr, &conn_pool) {
-                        None => {
-                            if let Ok(conn) = Connection::connect(
-                                my_addr,
-                                socket_addr,
-                                Arc::clone(&conn_pool),
-                                tx.clone(),
-                            ) {
-                                conn_pool.lock().unwrap().insert(conn.address, conn);
-                            };
-                        },
-                        Some(reason) => println!("Connection denied: {:?}", reason),
-                    }
+    let handle = thread::spawn(move || loop {
+        match rx.recv().unwrap() {
+            Message(Add(socket_addr)) => match is_connection_acceptable(&socket_addr, &conn_pool) {
+                None => {
+                    if let Ok(conn) =
+                        Connection::connect(my_addr, socket_addr, conn_pool.to_owned(), tx.clone())
+                    { conn_pool.lock().unwrap().insert(conn.address, conn);
+                    };
                 }
-                Message(Delete(socket_addr)) => {
-                    println!("Removing address: {:?}", &socket_addr);
-                    conn_pool.lock().unwrap().remove(&socket_addr);
-                }
-                Terminate => break,
+                Some(reason) => println!("Connection denied: {:?}", reason),
+            },
+            Message(Delete(socket_addr)) => {
+                println!("Removing address: {:?}", &socket_addr);
+                conn_pool.lock().unwrap().remove(&socket_addr);
             }
+            Terminate => break,
         }
     });
     Ok((handle, tx_c))

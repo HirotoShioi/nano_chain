@@ -15,7 +15,7 @@ pub enum ProtocolMessage {
     Accepted,
     Denied,
     CapacityReached,
-    AlreadyConnected, // Should be more specific (CapacityReached, AlreadyConnected, Denied)
+    AlreadyConnected,
     // Sharing states
     NewBlock(usize),
     /// Broadcast new block when minted
@@ -26,13 +26,20 @@ pub enum ProtocolMessage {
     Exiting(SocketAddr),
 }
 
+
+// If you want to switch over to http, change these functions
 // Want to make these functions generic
 
 ///Send `ProtocolMessage` the given stream
-pub fn send_message(server_address: Option<&SocketAddr>, stream: &TcpStream, message: ProtocolMessage) -> PeerResult<()> {
+pub fn send_message(
+    //Address you're sending to
+    server_address: Option<&SocketAddr>,
+    stream: &TcpStream,
+    message: ProtocolMessage,
+) -> PeerResult<()> {
     match server_address {
-        Some(address) =>  println!("Sending message to: {:?},  {:?}", address, message),
-        None => println!("Sending message: {:?}", message)
+        Some(address) => println!("Sending message to: {:?},  {:?}", address, message),
+        None => println!("Sending message: {:?}", message),
     };
     let mut stream_clone = stream.try_clone()?;
     serde_json::to_writer(stream, &message)?;

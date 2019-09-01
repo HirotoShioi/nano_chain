@@ -41,7 +41,7 @@ impl Connection {
         let done = Arc::new(AtomicBool::new(false));
 
         //Handles sending messages
-        let send_done = Arc::clone(&done);
+        let send_done = done.to_owned();
         let mut send_stream = stream.try_clone()?;
         let send_thread = thread::spawn(move || {
             loop {
@@ -65,12 +65,12 @@ impl Connection {
         });
 
         //Handles incoming message
-        let read_done = Arc::clone(&done);
+        let read_done = done.to_owned();
         let mut recv_stream = stream.try_clone()?;
         recv_stream.set_read_timeout(Some(Duration::from_millis(200)))?;
         let recv_thread = thread::spawn(move || {
             while !read_done.load(Ordering::Relaxed) {
-                if handle_recv_message(&recv_stream, Arc::clone(&conn_pool), conn_sender.clone())
+                if handle_recv_message(&recv_stream, &conn_pool, conn_sender.clone())
                     .is_ok()
                 {
                     recv_stream.flush().unwrap();
@@ -112,7 +112,9 @@ impl Connection {
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        self.conn_sender.send_terminate().expect("Unable to send terminate message");
+        self.conn_sender
+            .send_terminate()
+            .expect("Unable to send terminate message");
         self.done.store(true, Ordering::Relaxed);
 
         if let Some(thread) = self.send_thread.take() {
@@ -152,7 +154,7 @@ pub fn broadcast(pools: &ConnectionPool, message: ProtocolMessage) -> PeerResult
 ///Read messages from the `TcpStream` and handle them accordingly
 pub fn handle_recv_message(
     stream: &TcpStream,
-    pool: ConnectionPool,
+    pool: &ConnectionPool,
     conn_sender: MessageSender<PoolMessage>,
 ) -> PeerResult<()> {
     if let Ok(recv_message) = read_message(&stream) {
@@ -187,10 +189,10 @@ pub fn handle_recv_message(
 
                 let addr_len = new_addresses.len();
                 let msg = ReplyPeer(new_addresses, addr_len);
-                send_message(Some(&their_address), stream, msg).unwrap();
+                send_message(Some(&their_address), stream, msg)?;
             }
             Exiting(socket_addr) => {
-                conn_sender.send(PoolMessage::Delete(socket_addr)).unwrap();
+                conn_sender.send(PoolMessage::Delete(socket_addr))?;
             }
             _ => {}
         }
@@ -206,8 +208,8 @@ pub fn is_connection_acceptable(
     let conn_pool = conn_pool.lock().unwrap();
     if conn_pool.contains_key(socket_addr) {
         Some(AlreadyConnected)
-    //Need to subtract 1 because capacity() return lowerbound
-    } else if conn_pool.len() >= conn_pool.capacity() -1 {
+    //Need to subtract 1 because capacity() return lowerbound (capacity + 1)
+    } else if conn_pool.len() >= conn_pool.capacity() - 1 {
         Some(CapacityReached)
     } else {
         None

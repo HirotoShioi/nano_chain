@@ -1,4 +1,4 @@
-use std::sync::mpsc::{self, Sender, Receiver, SendError, RecvError};
+use std::sync::mpsc::{self, Receiver, RecvError, SendError, Sender};
 
 pub type PeerResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -30,11 +30,9 @@ pub enum ChanMessage<T> {
     Terminate,
 }
 
-#[derive(Clone)]
 pub struct MessageSender<T>(Sender<ChanMessage<T>>);
 
-impl<T> MessageSender<T> 
-{
+impl<T> MessageSender<T> {
     pub fn send(&self, t: T) -> Result<(), SendError<ChanMessage<T>>> {
         self.0.send(ChanMessage::Message(t))
     }

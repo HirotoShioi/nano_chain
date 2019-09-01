@@ -17,7 +17,7 @@ pub use protocol_message::ProtocolMessage::{self, *};
 use protocol_message::{read_message, send_message};
 
 pub use connection::*;
-pub use util::{PeerError, PeerResult, ChanMessage, MessageSender};
+pub use util::{ChanMessage, MessageSender, PeerError, PeerResult};
 
 ///Connection pool handling messages between peers
 
@@ -88,7 +88,7 @@ impl ConnectionManager {
 
         let pool = Arc::clone(&self.pools);
         let server_address = self.server_address;
-        let msg_done = self.messenger_done.clone();
+        let message_done = self.messenger_done.clone();
         ctrlc::set_handler(move || {
             broadcast(&pool, Exiting(server_address)).unwrap();
             // Clear the connection pool
@@ -96,12 +96,16 @@ impl ConnectionManager {
             // it from pool
             pool.lock().unwrap().clear();
             println!("Exiting");
-            msg_done.store(true, Ordering::Relaxed);
+            message_done.store(true, Ordering::Relaxed);
             process::exit(0);
         })
         .expect("Error setting Ctrl-C handler");
 
         if let Some(thread) = self.messenger_handle.take() {
+            thread.join().unwrap();
+        }
+
+        if let Some(thread) = self.register_handle.take() {
             thread.join().unwrap();
         }
     }
@@ -161,9 +165,13 @@ fn start_listener(
                             conn_sender_c,
                         )
                         .expect("Unable to send message");
-                        conn_pools.lock().expect("Unable to lock pool").insert(socket_addr, conn);
+                        conn_pools
+                            .lock()
+                            .expect("Unable to lock pool")
+                            .insert(socket_addr, conn);
                     }
-                    Some(err_message) => send_message(Some(&socket_addr), &stream, err_message).expect("Unable to send message"),
+                    Some(err_message) => send_message(Some(&socket_addr), &stream, err_message)
+                        .expect("Unable to send message"),
                 }
             } else {
                 send_message(None, &stream, Denied).expect("Unable to send message")

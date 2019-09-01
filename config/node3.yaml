@@ -2,5 +2,5 @@ peer_addresses:
 - 127.0.0.1:8002
 - 127.0.0.1:8001
 server_address: 127.0.0.1:8003
-capacity: 3
+capacity: 2
 mining: false
