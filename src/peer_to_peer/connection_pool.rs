@@ -28,7 +28,8 @@ pub fn start_pool_manager(
                 None => {
                     if let Ok(conn) =
                         Connection::connect(my_addr, socket_addr, conn_pool.to_owned(), tx.clone())
-                    { conn_pool.lock().unwrap().insert(conn.address, conn);
+                    {
+                        conn_pool.lock().unwrap().insert(conn.address, conn);
                     };
                 }
                 Some(reason) => println!("Connection denied: {:?}", reason),

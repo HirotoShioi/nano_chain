@@ -26,7 +26,6 @@ pub enum ProtocolMessage {
     Exiting(SocketAddr),
 }
 
-
 // If you want to switch over to http, change these functions
 // Want to make these functions generic
 

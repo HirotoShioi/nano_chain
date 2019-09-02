@@ -25,11 +25,10 @@ pub use util::{ChanMessage, MessageSender, PeerError, PeerResult};
 ///It also should provide interface that other modules can use
 pub struct ConnectionManager {
     server_address: SocketAddr,
+    addrs: Vec<SocketAddr>,
+    capacity: usize,
     pools: ConnectionPool,
-    register_handle: Option<JoinHandle<()>>,
     messenger_done: Arc<AtomicBool>,
-    messenger_handle: Option<JoinHandle<()>>,
-    addr_sender: MessageSender<PoolMessage>,
 }
 
 impl ConnectionManager {
@@ -43,46 +42,43 @@ impl ConnectionManager {
         capacity: usize,
     ) -> ConnectionManager {
         let pools = Arc::new(Mutex::new(HashMap::with_capacity(capacity)));
+        let messenger_done = Arc::new(AtomicBool::new(false));
 
+        ConnectionManager {
+            server_address,
+            addrs,
+            capacity,
+            pools,
+            messenger_done,
+        }
+    }
+
+    pub fn start(&mut self) {
         // If start is not being called, main thread will die
         // Move these into start()
         let (register_handle, addr_sender) =
-            start_pool_manager(server_address, Arc::clone(&pools)).unwrap();
+            start_pool_manager(self.server_address, Arc::clone(&self.pools)).unwrap();
 
-        for address in addrs.into_iter() {
+        for address in self.addrs.to_owned().into_iter() {
             addr_sender.send(PoolMessage::Add(address)).unwrap();
         }
 
         //Spawn thread for proactive messaging
-        let (messenger_done, messenger_handle) =
-            start_messenger(Arc::clone(&pools), capacity, server_address).unwrap();
+        let messenger_handle = start_messenger(
+            Arc::clone(&self.pools),
+            Arc::clone(&self.messenger_done),
+            self.capacity,
+            self.server_address,
+        )
+        .unwrap();
         //
 
-        ConnectionManager {
-            server_address,
-            pools,
-            register_handle: Some(register_handle),
-            messenger_done,
-            messenger_handle: Some(messenger_handle),
-            addr_sender,
-        }
-    }
-
-    /// Add new connection to the pool
-    pub fn add(&mut self, address: &str) -> PeerResult<()> {
-        let socket_addr = address.parse().unwrap();
-        self.addr_sender
-            .send(PoolMessage::Add(socket_addr))
-            .unwrap();
-        Ok(())
-    }
-
-    pub fn start(&mut self) {
         // Todo: drop self afterwards
         let listener_pool = Arc::clone(&self.pools);
         let server_address = self.server_address;
-        let addr_sender = self.addr_sender.to_owned();
+        let addr_sender = addr_sender.to_owned();
         let _listener_handle = thread::spawn(move || {
+            //Error handling
             start_listener(listener_pool, addr_sender, server_address);
         });
 
@@ -91,51 +87,18 @@ impl ConnectionManager {
         let message_done = self.messenger_done.clone();
         ctrlc::set_handler(move || {
             broadcast(&pool, Exiting(server_address)).unwrap();
+            message_done.store(true, Ordering::Relaxed);
             // Clear the connection pool
             // This will signal all the connected nodes that they should remove
             // it from pool
             pool.lock().unwrap().clear();
             println!("Exiting");
-            message_done.store(true, Ordering::Relaxed);
             process::exit(0);
         })
         .expect("Error setting Ctrl-C handler");
 
-        if let Some(thread) = self.messenger_handle.take() {
-            thread.join().unwrap();
-        }
-
-        if let Some(thread) = self.register_handle.take() {
-            thread.join().unwrap();
-        }
-    }
-}
-
-impl Drop for ConnectionManager {
-    fn drop(&mut self) {
-        println!("Dropping");
-
-        // self.broadcast(Exiting(self.server_address)).unwrap();
-
-        //Drop all the pool
-        for (_socket, conn) in self.pools.lock().unwrap().iter_mut() {
-            if let Some(thread) = conn.send_thread.take() {
-                thread.join().unwrap();
-            }
-
-            if let Some(thread) = conn.recv_thread.take() {
-                thread.join().unwrap();
-            }
-        }
-
-        if let Some(thread) = self.register_handle.take() {
-            thread.join().unwrap();
-        }
-
-        self.messenger_done.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.messenger_handle.take() {
-            thread.join().unwrap();
-        }
+        messenger_handle.join().unwrap();
+        register_handle.join().unwrap();
     }
 }
 
@@ -182,10 +145,10 @@ fn start_listener(
 
 fn start_messenger(
     conn_pool: ConnectionPool,
+    messenger_done: Arc<AtomicBool>,
     capacity: usize,
     my_address: SocketAddr,
-) -> PeerResult<(Arc<AtomicBool>, JoinHandle<()>)> {
-    let messenger_done = Arc::new(AtomicBool::new(false));
+) -> PeerResult<JoinHandle<()>> {
     let messenger_done_c = Arc::clone(&messenger_done);
     let messender_handle = thread::spawn(move || {
         while !messenger_done_c.load(Ordering::Relaxed) {
@@ -204,5 +167,5 @@ fn start_messenger(
         }
     });
 
-    Ok((messenger_done, messender_handle))
+    Ok(messender_handle)
 }

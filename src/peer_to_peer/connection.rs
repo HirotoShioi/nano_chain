@@ -70,9 +70,7 @@ impl Connection {
         recv_stream.set_read_timeout(Some(Duration::from_millis(200)))?;
         let recv_thread = thread::spawn(move || {
             while !read_done.load(Ordering::Relaxed) {
-                if handle_recv_message(&recv_stream, &conn_pool, conn_sender.clone())
-                    .is_ok()
-                {
+                if handle_recv_message(&recv_stream, &conn_pool, conn_sender.clone()).is_ok() {
                     recv_stream.flush().unwrap();
                 }
             }
