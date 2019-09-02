@@ -19,10 +19,12 @@ pub use connection_pool::{start_pool_manager, ConnectionPool, PoolMessage};
 pub use connection::*;
 pub use util::{ChanMessage, MessageSender, PeerError, PeerResult};
 
-const INTERVAL: u64 = 20;
-const MINIMUM_MINING_INTERVAL: u64 = 10;
-const RANDOM_DELAY_UPPERBOUND: u64 = 10;
-const RANDOM_DELAY_LOWERBOUND: u64 = 1;
+// Move these into configuration
+const CONNECTION_CHECK_INTERVAL: u64 = 20;
+const RANDOM_DELAY_UPPERBOUND: u64 = 20;
+const RANDOM_DELAY_LOWERBOUND: u64 = 10;
+const RANDOM_BROADCAST_LOWERBOUND: u64 = 1;
+const RANDOM_BROADCAST_UPPERBOUND: u64 = 3;
 
 const ADD_NUM_LOWERBOUND: u32 = 1;
 const ADD_NUM_UPPERBOUD: u32 = 10;
@@ -118,8 +120,8 @@ impl ConnectionManager {
             broadcast(&pool, Exiting(server_address)).unwrap();
             message_done.store(true, Ordering::Relaxed);
             // Clear the connection pool
-            // This will signal all the connected nodes that they should remove
-            // it from pool
+            // This will trigger `Drop`, messaging each of connection nodes
+            // that we have terminated
             pool.lock().unwrap().clear();
             println!("Exiting");
             process::exit(0);
@@ -186,7 +188,7 @@ fn start_messenger(
     let messenger_done_c = Arc::clone(&messenger_done);
     let messender_handle = thread::spawn(move || {
         while !messenger_done_c.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_secs(INTERVAL));
+            thread::sleep(Duration::from_secs(CONNECTION_CHECK_INTERVAL));
             let conn_pool = Arc::clone(&conn_pool);
             let conn_pool_c = Arc::clone(&conn_pool);
             // perform clean up (remove dead connection)
@@ -195,7 +197,9 @@ fn start_messenger(
             if conn_len < capacity {
                 let conn_addr: Vec<SocketAddr> = conn_pool.keys().map(|k| k.to_owned()).collect();
                 let ask_message = AskPeer(my_address, conn_addr, conn_len);
-                drop(conn_pool);
+                // You have to drop here explicity or else broadcast will not be
+                // able to lock the connection pool
+                drop(conn_pool); 
                 broadcast(&conn_pool_c, ask_message).unwrap();
             }
         }
@@ -214,24 +218,29 @@ fn start_mining(
         while !mining_done.load(Ordering::Relaxed) {
             //sleep for random time
             let mut rng = rand::thread_rng();
-            let interval = rng.gen_range(RANDOM_DELAY_LOWERBOUND, RANDOM_DELAY_UPPERBOUND)
-                + MINIMUM_MINING_INTERVAL;
+            let interval = rng.gen_range(RANDOM_DELAY_LOWERBOUND, RANDOM_DELAY_UPPERBOUND);
             thread::sleep(Duration::from_secs(interval));
 
             //generate random number
             let random_num = rng.gen_range(ADD_NUM_LOWERBOUND, ADD_NUM_UPPERBOUD);
 
-            //store num
-            let curr_num = shared_num.load(Ordering::Relaxed) + random_num;
-            let delay = rng.gen_range(RANDOM_DELAY_LOWERBOUND, RANDOM_DELAY_UPPERBOUND);
+            let new_num = shared_num.load(Ordering::Relaxed) + random_num;
+            let delay = rng.gen_range(RANDOM_BROADCAST_LOWERBOUND, RANDOM_BROADCAST_UPPERBOUND);
             println!(
                 "New value generated: {}, will broadcast in {} seconds",
-                curr_num, delay
+                new_num, delay
             );
             //Broadcast after some delay
             thread::sleep(Duration::from_secs(delay));
-            println!("Broadcasting new value");
-            broadcast(&pool, NewNumber(server_address, curr_num)).unwrap();
+
+            let curr_num = shared_num.load(Ordering::Relaxed);
+
+            if new_num > curr_num {
+                println!("Broadcasting new value");
+                broadcast(&pool, NewNumber(server_address, new_num)).unwrap();
+            } else {
+                println!("Got bigger value: {:?}, aborting broadcast", curr_num);
+            }
         }
     });
 
