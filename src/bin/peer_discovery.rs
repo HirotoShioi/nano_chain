@@ -36,6 +36,7 @@ fn main() {
         node_config.peer_addresses,
         node_config.server_address,
         node_config.capacity,
+        node_config.mining,
     );
 
     //You can insert something like a http server here which will enable you to

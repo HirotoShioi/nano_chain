@@ -3,7 +3,7 @@ use serde_json;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::net::{Shutdown, SocketAddr, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -33,10 +33,12 @@ pub struct Connection {
 impl Connection {
     ///Instantiate `Connection` and insert it into `ConnectionPool`
     pub fn connect_stream(
+        my_address: SocketAddr,
         socket_addr: SocketAddr,
         stream: TcpStream,
         conn_pool: ConnectionPool,
         conn_sender: MessageSender<PoolMessage>,
+        shared_num: Arc<AtomicU32>,
     ) -> PeerResult<Connection> {
         //Check if address aleady exists in the pool
         let (tx, rx) = channel();
@@ -72,7 +74,15 @@ impl Connection {
         recv_stream.set_read_timeout(Some(Duration::from_millis(READ_TIME_OUT)))?;
         let recv_thread = thread::spawn(move || {
             while !read_done.load(Ordering::Relaxed) {
-                if handle_recv_message(&recv_stream, &conn_pool, conn_sender.clone()).is_ok() {
+                if handle_recv_message(
+                    my_address,
+                    &recv_stream,
+                    &conn_pool,
+                    conn_sender.clone(),
+                    &shared_num,
+                )
+                .is_ok()
+                {
                     recv_stream.flush().unwrap();
                 }
             }
@@ -98,11 +108,20 @@ impl Connection {
         address: SocketAddr,
         conn_pool: ConnectionPool,
         conn_sender: MessageSender<PoolMessage>,
+        shared_num: Arc<AtomicU32>,
     ) -> PeerResult<Connection> {
         let stream = TcpStream::connect(address)?;
-        send_message(None, &stream, Request(my_address))?;
+        send_message(Some(&address), &stream, Request(my_address))?;
         if let Ok(Accepted) = read_message(&stream) {
-            let conn = Connection::connect_stream(address, stream, conn_pool, conn_sender).unwrap();
+            let conn = Connection::connect_stream(
+                my_address,
+                address,
+                stream,
+                conn_pool,
+                conn_sender,
+                shared_num,
+            )
+            .unwrap();
             Ok(conn)
         } else {
             Err(Box::new(PeerError::ConnectionDenied))
@@ -153,20 +172,34 @@ pub fn broadcast(pools: &ConnectionPool, message: ProtocolMessage) -> PeerResult
 
 ///Read messages from the `TcpStream` and handle them accordingly
 pub fn handle_recv_message(
+    my_address: SocketAddr, // We might use it..?
     stream: &TcpStream,
     pool: &ConnectionPool,
     conn_sender: MessageSender<PoolMessage>,
+    shared_num: &Arc<AtomicU32>,
 ) -> PeerResult<()> {
     if let Ok(recv_message) = read_message(&stream) {
         match recv_message {
             Ping => send_message(None, &stream, Pong)?,
-            NewBlock(_num) => {
-                //check if new number is bigger
-                //if yes, update it and broadcast to the others
+            NewBlock(their_num) => {
+                let my_num = shared_num.load(Ordering::Relaxed);
+                //If their number and your number is same, ignore it
+                if my_num < their_num {
+                    shared_num.store(their_num, Ordering::Relaxed);
+                    broadcast(&pool, NewBlock(their_num)).expect("Unable to");
+                } else if my_num > their_num {
+                    send_message(None, &stream, ReplyBlock(my_num))
+                        .expect("Unable to reply message");
+                }
             }
-            ReplyBlock(_num) => {
-                //check if new number is bigger
-                //if yes, update it and broadcast to the others
+            ReplyBlock(their_num) => {
+                let my_num = shared_num.load(Ordering::Relaxed);
+
+                if my_num < their_num {
+                    println!("Their number is bigger, storing");
+                    shared_num.store(their_num, Ordering::Relaxed);
+                }
+                //Should we broadcast it..?
             }
             ReplyPeer(socket_addresses, size) => {
                 socket_addresses.to_owned().truncate(size);
@@ -209,7 +242,7 @@ pub fn is_connection_acceptable(
     if conn_pool.contains_key(socket_addr) {
         Some(AlreadyConnected)
     //Need to subtract 1 because capacity() return lowerbound (capacity + 1)
-    } else if conn_pool.len() >= conn_pool.capacity() - 1 {
+    } else if conn_pool.len() > conn_pool.capacity() - 1 {
         Some(CapacityReached)
     } else {
         None
@@ -227,11 +260,12 @@ pub enum ProtocolMessage {
     CapacityReached,
     AlreadyConnected,
     // Sharing states
-    NewBlock(usize),
+    //Provide your address so receiver won't broadcast the newblock message to you
+    NewBlock(u32),
     /// Broadcast new block when minted
-    ReplyBlock(usize),
+    ReplyBlock(u32),
     /// Exchange information about peers
-    AskPeer(SocketAddr, Vec<SocketAddr>, usize), // Address are connnected
+    AskPeer(SocketAddr, Vec<SocketAddr>, usize), //usize should be how connection we want
     ReplyPeer(Vec<SocketAddr>, usize),
     Exiting(SocketAddr),
 }

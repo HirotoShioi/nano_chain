@@ -2,7 +2,7 @@ use ctrlc;
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener};
 use std::process;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -18,7 +18,7 @@ pub use connection_pool::{start_pool_manager, ConnectionPool, PoolMessage};
 pub use connection::*;
 pub use util::{ChanMessage, MessageSender, PeerError, PeerResult};
 
-const INTERVAL: u64 = 10;
+const INTERVAL: u64 = 20;
 
 ///Connection pool handling messages between peers
 
@@ -28,8 +28,10 @@ pub struct ConnectionManager {
     server_address: SocketAddr,
     addrs: Vec<SocketAddr>,
     capacity: usize,
-    pools: ConnectionPool,
     messenger_done: Arc<AtomicBool>,
+    mining: bool,
+    pools: ConnectionPool,
+    shared_num: Arc<AtomicU32>,
 }
 
 impl ConnectionManager {
@@ -41,9 +43,11 @@ impl ConnectionManager {
         addrs: Vec<SocketAddr>,
         server_address: SocketAddr,
         capacity: usize,
+        mining: bool,
     ) -> ConnectionManager {
         let pools = Arc::new(Mutex::new(HashMap::with_capacity(capacity)));
         let messenger_done = Arc::new(AtomicBool::new(false));
+        let shared_num = Arc::new(AtomicU32::new(0));
 
         ConnectionManager {
             server_address,
@@ -51,14 +55,20 @@ impl ConnectionManager {
             capacity,
             pools,
             messenger_done,
+            mining,
+            shared_num,
         }
     }
 
     pub fn start(&self) {
         // If start is not being called, main thread will die
         // Move these into start()
-        let (register_handle, addr_sender) =
-            start_pool_manager(self.server_address, Arc::clone(&self.pools)).unwrap();
+        let (register_handle, addr_sender) = start_pool_manager(
+            self.server_address,
+            Arc::clone(&self.pools),
+            self.shared_num.to_owned(),
+        )
+        .unwrap();
 
         for address in self.addrs.to_owned().into_iter() {
             addr_sender.send(PoolMessage::Add(address)).unwrap();
@@ -78,10 +88,13 @@ impl ConnectionManager {
         let listener_pool = Arc::clone(&self.pools);
         let server_address = self.server_address;
         let addr_sender = addr_sender.to_owned();
+        let shared_num_l = Arc::clone(&self.shared_num);
         let _listener_handle = thread::spawn(move || {
             //Error handling
-            start_listener(listener_pool, addr_sender, server_address);
+            start_listener(listener_pool, addr_sender, server_address, shared_num_l);
         });
+
+        //Start mining thread here
 
         let pool = Arc::clone(&self.pools);
         let server_address = self.server_address;
@@ -109,6 +122,7 @@ fn start_listener(
     pools: ConnectionPool,
     conn_sender: MessageSender<PoolMessage>,
     address: SocketAddr,
+    shared_num: Arc<AtomicU32>,
 ) {
     let listener = TcpListener::bind(address).unwrap();
     // accept connections and process them
@@ -116,6 +130,7 @@ fn start_listener(
         let conn_pools = Arc::clone(&pools);
         let conn_sender_c = conn_sender.clone();
         let conn_pools_c = Arc::clone(&pools);
+        let shared_num_c = Arc::clone(&shared_num);
         thread::spawn(move || {
             let stream = stream.unwrap();
             if let Ok(Request(socket_addr)) = read_message(&stream) {
@@ -123,10 +138,12 @@ fn start_listener(
                     None => {
                         send_message(Some(&socket_addr), &stream, Accepted).unwrap();
                         let conn = Connection::connect_stream(
+                            address,
                             socket_addr.to_owned(),
                             stream,
                             conn_pools_c,
                             conn_sender_c,
+                            shared_num_c,
                         )
                         .expect("Unable to send message");
                         conn_pools
