@@ -112,7 +112,7 @@ impl Connection {
     ) -> PeerResult<Connection> {
         let stream = TcpStream::connect(address)?;
         send_message(Some(&address), &stream, Request(my_address))?;
-        if let Ok(Accepted) = read_message(&stream) {
+        if let Ok(ConnectionAccepted) = read_message(&stream) {
             let conn = Connection::connect_stream(
                 my_address,
                 address,
@@ -172,7 +172,7 @@ pub fn broadcast(pools: &ConnectionPool, message: ProtocolMessage) -> PeerResult
 
 ///Read messages from the `TcpStream` and handle them accordingly
 pub fn handle_recv_message(
-    my_address: SocketAddr, // We might use it..?
+    _my_address: SocketAddr, // We might use it..?
     stream: &TcpStream,
     pool: &ConnectionPool,
     conn_sender: MessageSender<PoolMessage>,
@@ -181,22 +181,34 @@ pub fn handle_recv_message(
     if let Ok(recv_message) = read_message(&stream) {
         match recv_message {
             Ping => send_message(None, &stream, Pong)?,
-            NewBlock(their_num) => {
+            NewNumber(their_address, their_num) => {
                 let my_num = shared_num.load(Ordering::Relaxed);
                 //If their number and your number is same, ignore it
                 if my_num < their_num {
+                    println!("Their number is bigger than ours, accepting: {}", their_num);
                     shared_num.store(their_num, Ordering::Relaxed);
-                    broadcast(&pool, NewBlock(their_num)).expect("Unable to");
+
+                    send_message(None, &stream, NumAccepted(their_num))
+                        .expect("Unable to send accept message");
+                    for conn in pool.lock().unwrap().values() {
+                        if their_address != conn.address {
+                            conn.conn_sender
+                                .send(NewNumber(their_address, their_num))
+                                .expect("Failed to send message");
+                        }
+                    }
                 } else if my_num > their_num {
-                    send_message(None, &stream, ReplyBlock(my_num))
+                    send_message(None, &stream, NumDenied(my_num))
                         .expect("Unable to reply message");
                 }
             }
-            ReplyBlock(their_num) => {
+            NumAccepted(my_num) => {
+                shared_num.store(my_num, Ordering::Relaxed);
+            }
+            NumDenied(their_num) => {
                 let my_num = shared_num.load(Ordering::Relaxed);
-
                 if my_num < their_num {
-                    println!("Their number is bigger, storing");
+                    println!("Their number is bigger than ours, accepting: {}", their_num);
                     shared_num.store(their_num, Ordering::Relaxed);
                 }
                 //Should we broadcast it..?
@@ -255,15 +267,16 @@ pub enum ProtocolMessage {
     Pong,
     // Handshake
     Request(SocketAddr),
-    Accepted,
-    Denied,
+    ConnectionAccepted,
+    ConnectionDenied,
     CapacityReached,
     AlreadyConnected,
     // Sharing states
-    //Provide your address so receiver won't broadcast the newblock message to you
-    NewBlock(u32),
-    /// Broadcast new block when minted
-    ReplyBlock(u32),
+    //Broadcast new number when minted
+    NewNumber(SocketAddr, u32),
+    //Reply when you get when network has bigger number
+    NumDenied(u32),
+    NumAccepted(u32),
     /// Exchange information about peers
     AskPeer(SocketAddr, Vec<SocketAddr>, usize), //usize should be how connection we want
     ReplyPeer(Vec<SocketAddr>, usize),

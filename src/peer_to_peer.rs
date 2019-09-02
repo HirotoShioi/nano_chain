@@ -1,4 +1,5 @@
 use ctrlc;
+use rand::Rng;
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener};
 use std::process;
@@ -19,6 +20,12 @@ pub use connection::*;
 pub use util::{ChanMessage, MessageSender, PeerError, PeerResult};
 
 const INTERVAL: u64 = 20;
+const MINIMUM_MINING_INTERVAL: u64 = 10;
+const RANDOM_DELAY_UPPERBOUND: u64 = 10;
+const RANDOM_DELAY_LOWERBOUND: u64 = 1;
+
+const ADD_NUM_LOWERBOUND: u32 = 1;
+const ADD_NUM_UPPERBOUD: u32 = 10;
 
 ///Connection pool handling messages between peers
 
@@ -32,6 +39,8 @@ pub struct ConnectionManager {
     mining: bool,
     pools: ConnectionPool,
     shared_num: Arc<AtomicU32>,
+    // We need another AtomicU32 to store the temorary candidate number
+    // candidate_num: Arc<AtomicU32>
 }
 
 impl ConnectionManager {
@@ -82,9 +91,7 @@ impl ConnectionManager {
             self.server_address,
         )
         .unwrap();
-        //
 
-        // Todo: drop self afterwards
         let listener_pool = Arc::clone(&self.pools);
         let server_address = self.server_address;
         let addr_sender = addr_sender.to_owned();
@@ -95,6 +102,14 @@ impl ConnectionManager {
         });
 
         //Start mining thread here
+
+        let mining_done = Arc::new(AtomicBool::new(!self.mining));
+        let mining_handle = start_mining(
+            self.server_address,
+            self.pools.to_owned(),
+            mining_done.to_owned(),
+            self.shared_num.to_owned(),
+        );
 
         let pool = Arc::clone(&self.pools);
         let server_address = self.server_address;
@@ -113,6 +128,7 @@ impl ConnectionManager {
 
         messenger_handle.join().unwrap();
         register_handle.join().unwrap();
+        mining_handle.join().unwrap();
     }
 }
 
@@ -136,7 +152,7 @@ fn start_listener(
             if let Ok(Request(socket_addr)) = read_message(&stream) {
                 match is_connection_acceptable(&socket_addr, &conn_pools) {
                     None => {
-                        send_message(Some(&socket_addr), &stream, Accepted).unwrap();
+                        send_message(Some(&socket_addr), &stream, ConnectionAccepted).unwrap();
                         let conn = Connection::connect_stream(
                             address,
                             socket_addr.to_owned(),
@@ -155,7 +171,7 @@ fn start_listener(
                         .expect("Unable to send message"),
                 }
             } else {
-                send_message(None, &stream, Denied).expect("Unable to send message")
+                send_message(None, &stream, ConnectionDenied).expect("Unable to send message")
             }
         });
     }
@@ -186,4 +202,38 @@ fn start_messenger(
     });
 
     Ok(messender_handle)
+}
+
+fn start_mining(
+    server_address: SocketAddr,
+    pool: ConnectionPool,
+    mining_done: Arc<AtomicBool>,
+    shared_num: Arc<AtomicU32>,
+) -> JoinHandle<()> {
+    let handle = thread::spawn(move || {
+        while !mining_done.load(Ordering::Relaxed) {
+            //sleep for random time
+            let mut rng = rand::thread_rng();
+            let interval = rng.gen_range(RANDOM_DELAY_LOWERBOUND, RANDOM_DELAY_UPPERBOUND)
+                + MINIMUM_MINING_INTERVAL;
+            thread::sleep(Duration::from_secs(interval));
+
+            //generate random number
+            let random_num = rng.gen_range(ADD_NUM_LOWERBOUND, ADD_NUM_UPPERBOUD);
+
+            //store num
+            let curr_num = shared_num.load(Ordering::Relaxed) + random_num;
+            let delay = rng.gen_range(RANDOM_DELAY_LOWERBOUND, RANDOM_DELAY_UPPERBOUND);
+            println!(
+                "New value generated: {}, will broadcast in {} seconds",
+                curr_num, delay
+            );
+            //Broadcast after some delay
+            thread::sleep(Duration::from_secs(delay));
+            println!("Broadcasting new value");
+            broadcast(&pool, NewNumber(server_address, curr_num)).unwrap();
+        }
+    });
+
+    handle
 }

@@ -1,6 +1,7 @@
 extern crate base64;
 extern crate ctrlc;
 extern crate hex;
+extern crate rand;
 extern crate serde;
 extern crate serde_json;
 extern crate sha3;
