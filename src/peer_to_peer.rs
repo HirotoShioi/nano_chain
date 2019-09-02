@@ -19,6 +19,8 @@ use protocol_message::{read_message, send_message};
 pub use connection::*;
 pub use util::{ChanMessage, MessageSender, PeerError, PeerResult};
 
+const INTERVAL: u64 = 10;
+
 ///Connection pool handling messages between peers
 
 ///Connection manager is responsible of managing listener.
@@ -152,7 +154,7 @@ fn start_messenger(
     let messenger_done_c = Arc::clone(&messenger_done);
     let messender_handle = thread::spawn(move || {
         while !messenger_done_c.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_secs(10));
+            thread::sleep(Duration::from_secs(INTERVAL));
             let conn_pool = Arc::clone(&conn_pool);
             let conn_pool_c = Arc::clone(&conn_pool);
             // perform clean up (remove dead connection)

@@ -12,6 +12,8 @@ use super::util::*;
 
 use super::util::ChanMessage::*;
 
+const READ_TIME_OUT: u64 = 200;
+
 ///Connection handles message handling between peers
 ///It will start send and recv thread once instantiated.
 pub struct Connection {
@@ -67,7 +69,7 @@ impl Connection {
         //Handles incoming message
         let read_done = done.to_owned();
         let mut recv_stream = stream.try_clone()?;
-        recv_stream.set_read_timeout(Some(Duration::from_millis(200)))?;
+        recv_stream.set_read_timeout(Some(Duration::from_millis(READ_TIME_OUT)))?;
         let recv_thread = thread::spawn(move || {
             while !read_done.load(Ordering::Relaxed) {
                 if handle_recv_message(&recv_stream, &conn_pool, conn_sender.clone()).is_ok() {
