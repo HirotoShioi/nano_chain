@@ -154,9 +154,8 @@ fn start_listener(
             if let Ok(Request(socket_addr)) = read_message(&stream) {
                 match is_connection_acceptable(&socket_addr, &conn_pools) {
                     None => {
-                        send_message(Some(&socket_addr), &stream, ConnectionAccepted).unwrap();
+                        send_message(&socket_addr, &stream, ConnectionAccepted).unwrap();
                         let conn = Connection::connect_stream(
-                            address,
                             socket_addr.to_owned(),
                             stream,
                             conn_pools_c,
@@ -169,11 +168,12 @@ fn start_listener(
                             .expect("Unable to lock pool")
                             .insert(socket_addr, conn);
                     }
-                    Some(err_message) => send_message(Some(&socket_addr), &stream, err_message)
+                    Some(err_message) => send_message(&socket_addr, &stream, err_message)
                         .expect("Unable to send message"),
                 }
             } else {
-                send_message(None, &stream, ConnectionDenied).expect("Unable to send message")
+                let peer_addr = stream.peer_addr().unwrap();
+                send_message(&peer_addr, &stream, ConnectionDenied).expect("Unable to send message")
             }
         });
     }

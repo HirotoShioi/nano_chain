@@ -33,8 +33,7 @@ pub struct Connection {
 impl Connection {
     ///Instantiate `Connection` and insert it into `ConnectionPool`
     pub fn connect_stream(
-        my_address: SocketAddr,
-        socket_addr: SocketAddr,
+        their_addr: SocketAddr,
         stream: TcpStream,
         conn_pool: ConnectionPool,
         conn_sender: MessageSender<PoolMessage>,
@@ -56,7 +55,7 @@ impl Connection {
                         Message(msg) => {
                             //If write fails due to broken pipe, close the threads
                             // Make it cleaner
-                            if send_message(Some(&socket_addr), &send_stream, msg).is_err() {
+                            if send_message(&their_addr, &send_stream, msg).is_err() {
                                 drop(&send_stream);
                                 send_done.store(true, Ordering::Relaxed);
                             };
@@ -75,7 +74,7 @@ impl Connection {
         let recv_thread = thread::spawn(move || {
             while !read_done.load(Ordering::Relaxed) {
                 if handle_recv_message(
-                    my_address,
+                    their_addr,
                     &recv_stream,
                     &conn_pool,
                     conn_sender.clone(),
@@ -89,7 +88,7 @@ impl Connection {
         });
 
         let conn = Connection {
-            address: socket_addr,
+            address: their_addr,
             stream,
             send_thread: Some(send_thread),
             recv_thread: Some(recv_thread),
@@ -97,7 +96,7 @@ impl Connection {
             done,
         };
 
-        println!("New connection: {:?}", &socket_addr);
+        println!("New connection: {:?}", &their_addr);
         Ok(conn)
     }
 
@@ -105,17 +104,16 @@ impl Connection {
     ///If connection is successful, instantiate `Connection`
     pub fn connect(
         my_address: SocketAddr,
-        address: SocketAddr,
+        their_address: SocketAddr,
         conn_pool: ConnectionPool,
         conn_sender: MessageSender<PoolMessage>,
         shared_num: Arc<AtomicU32>,
     ) -> PeerResult<Connection> {
-        let stream = TcpStream::connect(address)?;
-        send_message(Some(&address), &stream, Request(my_address))?;
+        let stream = TcpStream::connect(their_address)?;
+        send_message(&their_address, &stream, Request(my_address))?;
         if let Ok(ConnectionAccepted) = read_message(&stream) {
             let conn = Connection::connect_stream(
-                my_address,
-                address,
+                their_address,
                 stream,
                 conn_pool,
                 conn_sender,
@@ -172,7 +170,7 @@ pub fn broadcast(pools: &ConnectionPool, message: ProtocolMessage) -> PeerResult
 
 ///Read messages from the `TcpStream` and handle them accordingly
 pub fn handle_recv_message(
-    _my_address: SocketAddr, // We might use it..?
+    their_addr: SocketAddr,
     stream: &TcpStream,
     pool: &ConnectionPool,
     conn_sender: MessageSender<PoolMessage>,
@@ -180,7 +178,7 @@ pub fn handle_recv_message(
 ) -> PeerResult<()> {
     if let Ok(recv_message) = read_message(&stream) {
         match recv_message {
-            Ping => send_message(None, &stream, Pong)?,
+            Ping => send_message(&their_addr, &stream, Pong)?,
             NewNumber(their_address, their_num) => {
                 let my_num = shared_num.load(Ordering::Relaxed);
                 //If their number and your number is same, ignore it
@@ -188,7 +186,7 @@ pub fn handle_recv_message(
                     println!("Their number is bigger than ours, accepting: {}", their_num);
                     shared_num.store(their_num, Ordering::Relaxed);
 
-                    send_message(None, &stream, NumAccepted(their_num))
+                    send_message(&their_addr, &stream, NumAccepted(their_num))
                         .expect("Unable to send accept message");
                     for conn in pool.lock().unwrap().values() {
                         if their_address != conn.address {
@@ -198,7 +196,7 @@ pub fn handle_recv_message(
                         }
                     }
                 } else if my_num > their_num {
-                    send_message(None, &stream, NumDenied(my_num))
+                    send_message(&their_addr, &stream, NumDenied(my_num))
                         .expect("Unable to reply message");
                 }
             }
@@ -234,7 +232,7 @@ pub fn handle_recv_message(
 
                 let addr_len = new_addresses.len();
                 let msg = ReplyPeer(new_addresses, addr_len);
-                send_message(Some(&their_address), stream, msg)?;
+                send_message(&their_address, stream, msg)?;
             }
             Exiting(socket_addr) => {
                 conn_sender.send(PoolMessage::Delete(socket_addr))?;
@@ -289,14 +287,11 @@ use super::connection::ProtocolMessage::*;
 ///Send `ProtocolMessage` the given stream
 pub fn send_message(
     //Address you're sending to
-    server_address: Option<&SocketAddr>,
+    their_addr: &SocketAddr,
     stream: &TcpStream,
     message: ProtocolMessage,
 ) -> PeerResult<()> {
-    match server_address {
-        Some(address) => println!("Sending message to: {:?},  {:?}", address, message),
-        None => println!("Sending message: {:?}", message),
-    };
+    println!("Sending message to: {:?},  {:?}", their_addr, message);
     let mut stream_clone = stream.try_clone()?;
     serde_json::to_writer(stream, &message)?;
     stream_clone.write_all(b"\n")?;
