@@ -32,7 +32,10 @@ pub fn start_pool_manager(
                         conn_pool.lock().unwrap().insert(conn.address, conn);
                     };
                 }
-                Some(reason) => println!("Connection denied: {:?}", reason),
+                Some(reason) => println!(
+                    "Connection denied on {:?}, reason: {:?}",
+                    socket_addr, reason
+                ),
             },
             Message(Delete(socket_addr)) => {
                 println!("Removing address: {:?}", &socket_addr);

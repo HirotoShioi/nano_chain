@@ -6,8 +6,6 @@ use serde::Deserialize;
 
 use std::fs;
 use std::net::SocketAddr;
-// use std::thread;
-// use std::time::Duration;
 
 use nano_chain::ConnectionManager;
 
@@ -27,18 +25,22 @@ fn main() {
         )
         .get_matches();
 
+    // This is required, we know this value is given
     let config_path = matches.value_of("config").unwrap();
     let node_config = read_node_config(config_path).expect("Failed to read file");
 
     println!("{:?}", node_config);
     println!("Starting node");
 
-    ConnectionManager::new(
+    let connection_manager = ConnectionManager::new(
         node_config.peer_addresses,
         node_config.server_address,
         node_config.capacity,
-    )
-    .start();
+    );
+
+    //You can insert something like a http server here which will enable you to
+    //interact with the manager via browser/curl.
+    connection_manager.start();
 }
 
 #[derive(Debug, Deserialize)]

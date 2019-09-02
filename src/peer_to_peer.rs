@@ -9,12 +9,11 @@ use std::time::Duration;
 
 mod connection;
 mod connection_pool;
-mod protocol_message;
 mod util;
 
+pub use connection::ProtocolMessage::{self, *};
+use connection::{read_message, send_message};
 pub use connection_pool::{start_pool_manager, ConnectionPool, PoolMessage};
-pub use protocol_message::ProtocolMessage::{self, *};
-use protocol_message::{read_message, send_message};
 
 pub use connection::*;
 pub use util::{ChanMessage, MessageSender, PeerError, PeerResult};
@@ -55,7 +54,7 @@ impl ConnectionManager {
         }
     }
 
-    pub fn start(&mut self) {
+    pub fn start(&self) {
         // If start is not being called, main thread will die
         // Move these into start()
         let (register_handle, addr_sender) =
