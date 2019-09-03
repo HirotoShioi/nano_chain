@@ -2,6 +2,8 @@ extern crate clap;
 extern crate serde_yaml;
 
 use clap::{App, Arg};
+use env_logger::Builder;
+use log::info;
 
 use nano_chain::{read_node_config, ConnectionManager};
 
@@ -25,8 +27,12 @@ fn main() {
     let config_path = matches.value_of("config").unwrap();
     let node_config = read_node_config(config_path).expect("Failed to read file");
 
-    println!("{:#?}", node_config);
-    println!("Starting node");
+    Builder::from_default_env()
+        .default_format_module_path(false)
+        .default_format_timestamp(true)
+        .init();
+    info!("{:#?}", node_config);
+    info!("Starting node");
 
     let connection_manager = ConnectionManager::new(node_config).unwrap();
 

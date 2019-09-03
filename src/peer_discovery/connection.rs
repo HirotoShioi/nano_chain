@@ -12,6 +12,8 @@ use super::connection_pool::{ConnectionPool, PoolMessage};
 use super::util::ChanMessage::*;
 use super::util::*;
 
+use log::{info, trace, warn};
+
 const READ_TIME_OUT: u64 = 200;
 
 ///Connection handles message handling between peers
@@ -291,7 +293,7 @@ pub fn send_message(
     stream: &TcpStream,
     message: ProtocolMessage,
 ) -> PeerResult<()> {
-    println!("Sending message to: {:?},  {:?}", their_addr, message);
+    trace!("Sending message to: {:?},  {:?}", their_addr, message);
     let mut stream_clone = stream.try_clone()?;
     serde_json::to_writer(stream, &message)?;
     stream_clone.write_all(b"\n")?;
@@ -305,6 +307,6 @@ pub fn read_message(stream: &TcpStream) -> PeerResult<ProtocolMessage> {
     let mut buffer = String::new();
     reader.read_line(&mut buffer)?;
     let recv_message: ProtocolMessage = serde_json::from_str(&buffer)?;
-    println!("Got message: {:?}", recv_message);
+    trace!("Got message: {:?}", recv_message);
     Ok(recv_message)
 }
