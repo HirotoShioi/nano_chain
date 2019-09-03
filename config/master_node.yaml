@@ -1,7 +1,7 @@
 #This will be the node that all nodes connect to initially
 peer_addresses: []
 server_address: 127.0.0.1:8001
-capacity: 5
+capacity: 3
 connection_check_interval: 30
 mining: true
 # configuration for mining
@@ -9,5 +9,5 @@ mining_delay_lowerbound: 10
 mining_delay_upperbound: 20
 broadcast_delay_lowerbound: 1
 broadcast_delay_upperbound: 3
-add_num_lowerbound: 1
-add_num_upperbound: 10
+add_num_lowerbound: 10
+add_num_upperbound: 20

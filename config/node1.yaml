@@ -1,14 +1,12 @@
 peer_addresses:
-- 127.0.0.1:8003
 - 127.0.0.1:8001
-server_address: 127.0.0.1:7878
+server_address: 127.0.0.1:8002
 capacity: 2
 connection_check_interval: 30
 mining: true
-# configuration for mining
 mining_delay_lowerbound: 10
 mining_delay_upperbound: 20
 broadcast_delay_lowerbound: 1
 broadcast_delay_upperbound: 3
-add_num_lowerbound: 1
-add_num_upperbound: 10
+add_num_lowerbound: 10
+add_num_upperbound: 20
