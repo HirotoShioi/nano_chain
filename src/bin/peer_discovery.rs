@@ -21,7 +21,7 @@ fn main() {
         )
         .get_matches();
 
-    // This is required, we know this value is given
+    // Since this is required, we know this value is given
     let config_path = matches.value_of("config").unwrap();
     let node_config = read_node_config(config_path).expect("Failed to read file");
 

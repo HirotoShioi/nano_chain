@@ -13,12 +13,14 @@ mod connection;
 mod connection_pool;
 mod util;
 
-pub use configuration::{is_valid_config, read_node_config, ConfigError, NodeConfig};
+use configuration::{is_valid_config, ConfigError};
+pub use configuration::{read_node_config, NodeConfig};
 pub use connection::ProtocolMessage::{self, *};
-pub use connection::*;
+use connection::{broadcast, is_connection_acceptable, Connection};
 use connection::{read_message, send_message};
-pub use connection_pool::{start_pool_manager, ConnectionPool, PoolMessage};
-pub use util::{ChanMessage, MessageSender, PeerError, PeerResult};
+use connection_pool::{start_pool_manager, ConnectionPool, PoolMessage};
+pub use util::PeerError;
+use util::{MessageSender, PeerResult};
 
 ///Connection pool handling messages between peers
 
