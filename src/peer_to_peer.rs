@@ -8,31 +8,23 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+mod configuration;
 mod connection;
 mod connection_pool;
 mod util;
 
+pub use configuration::{is_valid_config, read_node_config, ConfigError, NodeConfig};
 pub use connection::ProtocolMessage::{self, *};
+pub use connection::*;
 use connection::{read_message, send_message};
 pub use connection_pool::{start_pool_manager, ConnectionPool, PoolMessage};
-
-pub use connection::*;
 pub use util::{ChanMessage, MessageSender, PeerError, PeerResult};
-
-// Move these into configuration
-const CONNECTION_CHECK_INTERVAL: u64 = 20;
-const RANDOM_DELAY_UPPERBOUND: u64 = 20;
-const RANDOM_DELAY_LOWERBOUND: u64 = 10;
-const RANDOM_BROADCAST_LOWERBOUND: u64 = 1;
-const RANDOM_BROADCAST_UPPERBOUND: u64 = 3;
-
-const ADD_NUM_LOWERBOUND: u32 = 1;
-const ADD_NUM_UPPERBOUD: u32 = 10;
 
 ///Connection pool handling messages between peers
 
 ///Connection manager is responsible of managing listener.
 ///It also should provide interface that other modules can use
+#[derive(Clone)]
 pub struct ConnectionManager {
     server_address: SocketAddr,
     addrs: Vec<SocketAddr>,
@@ -41,8 +33,13 @@ pub struct ConnectionManager {
     mining: bool,
     pools: ConnectionPool,
     shared_num: Arc<AtomicU32>,
-    // We need another AtomicU32 to store the temorary candidate number
-    // candidate_num: Arc<AtomicU32>
+    connection_check_interval: u64,
+    mining_delay_lowerbound: u64,
+    mining_delay_upperbound: u64,
+    broadcast_delay_lowerbound: u64,
+    broadcast_delay_upperbound: u64,
+    add_num_lowerbound: u32,
+    add_num_upperbound: u32,
 }
 
 impl ConnectionManager {
@@ -50,25 +47,32 @@ impl ConnectionManager {
     ///
     /// You can provide vector of addresses which can be used to connect to the other
     /// nodes initially as well as launching server by providin `server_address`
-    pub fn new(
-        addrs: Vec<SocketAddr>,
-        server_address: SocketAddr,
-        capacity: usize,
-        mining: bool,
-    ) -> ConnectionManager {
-        let pools = Arc::new(Mutex::new(HashMap::with_capacity(capacity)));
+    pub fn new(config: NodeConfig) -> Result<ConnectionManager, ConfigError> {
+        if let Err(err) = is_valid_config(&config) {
+            return Err(err);
+        }
+        let pools = Arc::new(Mutex::new(HashMap::with_capacity(config.capacity)));
         let messenger_done = Arc::new(AtomicBool::new(false));
         let shared_num = Arc::new(AtomicU32::new(0));
 
-        ConnectionManager {
-            server_address,
-            addrs,
-            capacity,
+        let conn_manager = ConnectionManager {
+            server_address: config.server_address,
+            addrs: config.peer_addresses,
+            capacity: config.capacity,
             pools,
             messenger_done,
-            mining,
+            mining: config.mining,
             shared_num,
-        }
+            connection_check_interval: config.connection_check_interval,
+            mining_delay_lowerbound: config.mining_delay_lowerbound,
+            mining_delay_upperbound: config.mining_delay_upperbound,
+            broadcast_delay_lowerbound: config.broadcast_delay_lowerbound,
+            broadcast_delay_upperbound: config.broadcast_delay_upperbound,
+            add_num_lowerbound: config.add_num_lowerbound,
+            add_num_upperbound: config.add_num_upperbound,
+        };
+
+        Ok(conn_manager)
     }
 
     pub fn start(&self) {
@@ -87,6 +91,7 @@ impl ConnectionManager {
 
         //Spawn thread for proactive messaging
         let messenger_handle = start_messenger(
+            self.connection_check_interval,
             Arc::clone(&self.pools),
             Arc::clone(&self.messenger_done),
             self.capacity,
@@ -106,12 +111,7 @@ impl ConnectionManager {
         //Start mining thread here
 
         let mining_done = Arc::new(AtomicBool::new(!self.mining));
-        let mining_handle = start_mining(
-            self.server_address,
-            self.pools.to_owned(),
-            mining_done.to_owned(),
-            self.shared_num.to_owned(),
-        );
+        let mining_handle = start_mining(self.to_owned(), mining_done.to_owned());
 
         let pool = Arc::clone(&self.pools);
         let server_address = self.server_address;
@@ -180,6 +180,7 @@ fn start_listener(
 }
 
 fn start_messenger(
+    interval: u64,
     conn_pool: ConnectionPool,
     messenger_done: Arc<AtomicBool>,
     capacity: usize,
@@ -188,7 +189,7 @@ fn start_messenger(
     let messenger_done_c = Arc::clone(&messenger_done);
     let messender_handle = thread::spawn(move || {
         while !messenger_done_c.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_secs(CONNECTION_CHECK_INTERVAL));
+            thread::sleep(Duration::from_secs(interval));
             let conn_pool = Arc::clone(&conn_pool);
             let conn_pool_c = Arc::clone(&conn_pool);
             // perform clean up (remove dead connection)
@@ -199,7 +200,7 @@ fn start_messenger(
                 let ask_message = AskPeer(my_address, conn_addr, conn_len);
                 // You have to drop here explicity or else broadcast will not be
                 // able to lock the connection pool
-                drop(conn_pool); 
+                drop(conn_pool);
                 broadcast(&conn_pool_c, ask_message).unwrap();
             }
         }
@@ -208,24 +209,25 @@ fn start_messenger(
     Ok(messender_handle)
 }
 
-fn start_mining(
-    server_address: SocketAddr,
-    pool: ConnectionPool,
-    mining_done: Arc<AtomicBool>,
-    shared_num: Arc<AtomicU32>,
-) -> JoinHandle<()> {
+fn start_mining(manager: ConnectionManager, mining_done: Arc<AtomicBool>) -> JoinHandle<()> {
     let handle = thread::spawn(move || {
         while !mining_done.load(Ordering::Relaxed) {
             //sleep for random time
             let mut rng = rand::thread_rng();
-            let interval = rng.gen_range(RANDOM_DELAY_LOWERBOUND, RANDOM_DELAY_UPPERBOUND);
+            let interval = rng.gen_range(
+                manager.mining_delay_lowerbound,
+                manager.mining_delay_upperbound,
+            );
             thread::sleep(Duration::from_secs(interval));
 
             //generate random number
-            let random_num = rng.gen_range(ADD_NUM_LOWERBOUND, ADD_NUM_UPPERBOUD);
+            let random_num = rng.gen_range(manager.add_num_lowerbound, manager.add_num_upperbound);
 
-            let new_num = shared_num.load(Ordering::Relaxed) + random_num;
-            let delay = rng.gen_range(RANDOM_BROADCAST_LOWERBOUND, RANDOM_BROADCAST_UPPERBOUND);
+            let new_num = manager.shared_num.load(Ordering::Relaxed) + random_num;
+            let delay = rng.gen_range(
+                manager.broadcast_delay_lowerbound,
+                manager.broadcast_delay_upperbound,
+            );
             println!(
                 "New value generated: {}, will broadcast in {} seconds",
                 new_num, delay
@@ -233,11 +235,11 @@ fn start_mining(
             //Broadcast after some delay
             thread::sleep(Duration::from_secs(delay));
 
-            let curr_num = shared_num.load(Ordering::Relaxed);
+            let curr_num = manager.shared_num.load(Ordering::Relaxed);
 
             if new_num > curr_num {
                 println!("Broadcasting new value");
-                broadcast(&pool, NewNumber(server_address, new_num)).unwrap();
+                broadcast(&manager.pools, NewNumber(manager.server_address, new_num)).unwrap();
             } else {
                 println!("Got bigger value: {:?}, aborting broadcast", curr_num);
             }
