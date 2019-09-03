@@ -8,10 +8,10 @@ extern crate sha3;
 
 mod blockchain;
 mod node;
-mod peer_to_peer;
+mod peer_discovery;
 mod utxo;
 
 pub use blockchain::{Block, BlockChain};
 pub use node::Node;
-pub use peer_to_peer::{read_node_config, ConnectionManager, PeerError, ProtocolMessage};
+pub use peer_discovery::{read_node_config, ConnectionManager, PeerError, ProtocolMessage};
 pub use utxo::{Transaction, TransactionError, UTXO};
