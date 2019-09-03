@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use log::{warn, info};
 
 use super::connection::{is_connection_acceptable, Connection};
 use super::util::ChanMessage::*;
@@ -38,13 +39,13 @@ pub fn start_pool_manager(
                         conn_pool.lock().unwrap().insert(conn.address, conn);
                     };
                 }
-                Some(reason) => println!(
+                Some(reason) => warn!(
                     "Connection denied on {:?}, reason: {:?}",
                     socket_addr, reason
                 ),
             },
             Message(Delete(socket_addr)) => {
-                println!("Removing address: {:?}", &socket_addr);
+                warn!("Removing address: {:?}", &socket_addr);
                 conn_pool.lock().unwrap().remove(&socket_addr);
             }
             Terminate => break,

@@ -29,10 +29,9 @@ fn main() {
 
     Builder::from_default_env()
         .default_format_module_path(false)
-        .default_format_timestamp(true)
+        .default_format_timestamp(false)
         .init();
     info!("{:#?}", node_config);
-    info!("Starting node");
 
     let connection_manager = ConnectionManager::new(node_config).unwrap();
 

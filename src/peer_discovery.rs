@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use log::{info, warn};
 
 mod configuration;
 mod connection;
@@ -78,6 +79,7 @@ impl ConnectionManager {
     }
 
     pub fn start(&self) {
+        info!("Starting the node");
         // If start is not being called, main thread will die
         // Move these into start()
         let (register_handle, addr_sender) = start_pool_manager(
@@ -116,16 +118,15 @@ impl ConnectionManager {
         let mining_handle = start_mining(self.to_owned(), mining_done.to_owned());
 
         let pool = Arc::clone(&self.pools);
-        let server_address = self.server_address;
         let message_done = self.messenger_done.clone();
         ctrlc::set_handler(move || {
-            broadcast(&pool, Exiting(server_address)).unwrap();
+            broadcast(&pool, Exiting).unwrap();
             message_done.store(true, Ordering::Relaxed);
             // Clear the connection pool
             // This will trigger `Drop`, messaging each of connection nodes
             // that we have terminated
             pool.lock().unwrap().clear();
-            println!("Exiting");
+            warn!("Shutting down the node");
             process::exit(0);
         })
         .expect("Error setting Ctrl-C handler");
@@ -154,6 +155,7 @@ fn start_listener(
         thread::spawn(move || {
             let stream = stream.unwrap();
             if let Ok(Request(socket_addr)) = read_message(&stream) {
+                info!("Received connection request from: {:?}", socket_addr);
                 match is_connection_acceptable(&socket_addr, &conn_pools) {
                     None => {
                         send_message(&socket_addr, &stream, ConnectionAccepted).unwrap();
@@ -198,6 +200,7 @@ fn start_messenger(
             let conn_pool = conn_pool.lock().unwrap();
             let conn_len = conn_pool.len();
             if conn_len < capacity {
+                info!("Wants more connection, asking others");
                 let conn_addr: Vec<SocketAddr> = conn_pool.keys().map(|k| k.to_owned()).collect();
                 let ask_message = AskPeer(my_address, conn_addr, conn_len);
                 // You have to drop here explicity or else broadcast will not be
@@ -230,8 +233,8 @@ fn start_mining(manager: ConnectionManager, mining_done: Arc<AtomicBool>) -> Joi
                 manager.broadcast_delay_lowerbound,
                 manager.broadcast_delay_upperbound,
             );
-            println!(
-                "New value generated: {}, will broadcast in {} seconds",
+            info!(
+                "New number generated: {}, will broadcast in {} seconds",
                 new_num, delay
             );
             //Broadcast after some delay
@@ -240,10 +243,10 @@ fn start_mining(manager: ConnectionManager, mining_done: Arc<AtomicBool>) -> Joi
             let curr_num = manager.shared_num.load(Ordering::Relaxed);
 
             if new_num > curr_num {
-                println!("Broadcasting new value");
+                info!("Broadcasting: {:?}", new_num);
                 broadcast(&manager.pools, NewNumber(manager.server_address, new_num)).unwrap();
             } else {
-                println!("Got bigger value: {:?}, aborting broadcast", curr_num);
+                warn!("Got bigger number: {:?}, aborting broadcast", curr_num);
             }
         }
     });

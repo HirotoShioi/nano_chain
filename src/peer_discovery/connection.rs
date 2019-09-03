@@ -7,12 +7,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+use log::{info, trace, warn};
 
 use super::connection_pool::{ConnectionPool, PoolMessage};
 use super::util::ChanMessage::*;
 use super::util::*;
-
-use log::{info, trace, warn};
 
 const READ_TIME_OUT: u64 = 200;
 
@@ -98,7 +97,7 @@ impl Connection {
             done,
         };
 
-        println!("New connection: {:?}", &their_addr);
+        info!("New connection accepted: {:?}", &their_addr);
         Ok(conn)
     }
 
@@ -111,6 +110,7 @@ impl Connection {
         conn_sender: MessageSender<PoolMessage>,
         shared_num: Arc<AtomicU32>,
     ) -> PeerResult<Connection> {
+        info!("Attempting to connect to the node: {:?}", their_address);
         let stream = TcpStream::connect(their_address)?;
         send_message(&their_address, &stream, Request(my_address))?;
         if let Ok(ConnectionAccepted) = read_message(&stream) {
@@ -182,10 +182,11 @@ pub fn handle_recv_message(
         match recv_message {
             Ping => send_message(&their_addr, &stream, Pong)?,
             NewNumber(their_address, their_num) => {
+                info!("New value from {:?}: {:?}", their_address, their_num);
                 let my_num = shared_num.load(Ordering::Relaxed);
                 //If their number and your number is same, ignore it
                 if my_num < their_num {
-                    println!("Their number is bigger than ours, accepting: {}", their_num);
+                    info!("Their number({:?}) is bigger than ours({:?}), accepting", their_num, my_num);
                     shared_num.store(their_num, Ordering::Relaxed);
 
                     send_message(&their_addr, &stream, NumAccepted(their_num))
@@ -198,17 +199,19 @@ pub fn handle_recv_message(
                         }
                     }
                 } else if my_num > their_num {
+                    info!("Our value is bigger({:?}), responsing", my_num);
                     send_message(&their_addr, &stream, NumDenied(my_num))
                         .expect("Unable to reply message");
                 }
             }
             NumAccepted(my_num) => {
+                info!("Number accepted: {:?}", my_num);
                 shared_num.store(my_num, Ordering::Relaxed);
             }
             NumDenied(their_num) => {
                 let my_num = shared_num.load(Ordering::Relaxed);
                 if my_num < their_num {
-                    println!("Their number is bigger than ours, accepting: {}", their_num);
+                    info!("Their number({:?}) is bigger than ours({:?})", their_num, my_num);
                     shared_num.store(their_num, Ordering::Relaxed);
                 }
                 //Should we broadcast it..?
@@ -236,8 +239,9 @@ pub fn handle_recv_message(
                 let msg = ReplyPeer(new_addresses, addr_len);
                 send_message(&their_address, stream, msg)?;
             }
-            Exiting(socket_addr) => {
-                conn_sender.send(PoolMessage::Delete(socket_addr))?;
+            Exiting => {
+                warn!("Node {:?} is shutting down", their_addr);
+                conn_sender.send(PoolMessage::Delete(their_addr))?;
             }
             _ => {}
         }
@@ -280,7 +284,7 @@ pub enum ProtocolMessage {
     /// Exchange information about peers
     AskPeer(SocketAddr, Vec<SocketAddr>, usize), //usize should be how connection we want
     ReplyPeer(Vec<SocketAddr>, usize),
-    Exiting(SocketAddr),
+    Exiting,
 }
 
 use super::connection::ProtocolMessage::*;

@@ -1,4 +1,4 @@
-CMD="./target/release/peer_discovery -c ./config"
+CMD="RUST_LOG=info ./target/release/peer_discovery -c ./config"
 
 tmux split-window -h
 tmux split-window -v
@@ -12,3 +12,5 @@ tmux send-keys "${CMD}/node1.yaml" C-m
 tmux select-pane -t 2
 tmux send-keys "${CMD}/node2.yaml" C-m
 tmux select-pane -t 3
+
+# tmux send-keys -t 2 C-c "RUST_LOG=info ./target/release/peer_discovery -c ./config/node2.yaml" C-m
