@@ -21,7 +21,7 @@ const READ_TIME_OUT: u64 = 200;
 pub struct Connection {
     /// Address we're connecting to
     pub address: SocketAddr,
-    /// Stream 
+    /// Stream
     pub stream: TcpStream,
     // Thread handle for send operation
     pub send_thread: Option<JoinHandle<()>>,
@@ -63,7 +63,7 @@ impl Connection {
                             //If write fails due to broken pipe, close the threads
                             // Make it cleaner
                             if send_message(&their_addr, &send_stream, msg).is_err() {
-                                drop(&send_stream);
+                                drop(send_stream.try_clone().unwrap());
                                 send_done.store(true, Ordering::Relaxed);
                             };
                             send_stream.flush().expect("Unable to flush stream");
@@ -108,17 +108,17 @@ impl Connection {
     }
 
     /// Create TCPStream with given SocketAddr
-    /// 
+    ///
     ///This will perform a handshake between opponent to reach an
     /// agreement on whether they can talk to one another.
-    /// 
+    ///
     /// Agreement will fail if:
-    /// 
+    ///
     /// - Opponent sends invalid message. Any message other than `ConnectionAccepted`
     /// will mean we're not able to talk to them.
-    /// 
+    ///
     /// - Opponent cannot be reached (Network error)
-    /// 
+    ///
     /// - Opponent does not have the capacity to talk with us
     pub fn connect(
         my_address: SocketAddr,
@@ -263,7 +263,7 @@ pub fn handle_recv_message(
 }
 
 ///This will determine whether we can connect to the given `SocketAddr`
-/// 
+///
 /// If not, this will return `Some` with the reason.
 pub fn is_connection_acceptable(
     socket_addr: &SocketAddr,

@@ -154,7 +154,7 @@ impl ConnectionManager {
 }
 
 ///Start the network server by binding to given address.
-/// 
+///
 // (TODO): If listener cannot be binded, let the program crash.
 fn start_listener(
     pools: ConnectionPool,
@@ -235,7 +235,7 @@ fn start_messenger(
 
 ///Start a thread which will perform mining
 fn start_mining(manager: ConnectionManager, mining_done: Arc<AtomicBool>) -> JoinHandle<()> {
-    let handle = thread::spawn(move || {
+    thread::spawn(move || {
         while !mining_done.load(Ordering::Relaxed) {
             //sleep for random time
             let mut rng = rand::thread_rng();
@@ -269,7 +269,5 @@ fn start_mining(manager: ConnectionManager, mining_done: Arc<AtomicBool>) -> Joi
                 warn!("Got bigger number: {:?}, aborting broadcast", curr_num);
             }
         }
-    });
-
-    handle
+    })
 }

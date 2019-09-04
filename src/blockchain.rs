@@ -8,7 +8,7 @@ type Index = u32;
 type Hash = String;
 type Timestamp = u64;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct BlockChain {
     blocks: Vec<Block>,
 }
