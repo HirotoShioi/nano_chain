@@ -3,6 +3,7 @@ use serde::Deserialize;
 use std::fs;
 use std::net::SocketAddr;
 
+/// Configuration used for running the `ConnectionManager`
 #[derive(Debug, Deserialize)]
 pub struct NodeConfig {
     pub peer_addresses: Vec<SocketAddr>,
@@ -27,12 +28,14 @@ pub enum ConfigError {
 
 use super::configuration::ConfigError::*;
 
+///Read given file path and returns `NodeConfig`
 pub fn read_node_config(config_path: &str) -> std::io::Result<NodeConfig> {
     let content = fs::read(config_path).expect("Unable to read file");
     let node_config: NodeConfig = serde_yaml::from_slice(&content).expect("Failed to parse file");
     Ok(node_config)
 }
 
+///Checks whether given `NodeConfig` is valid
 pub fn is_valid_config(config: &NodeConfig) -> Result<(), ConfigError> {
     if config.mining_delay_lowerbound > config.mining_delay_upperbound {
         Err(MiningDelayInvalid)

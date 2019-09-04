@@ -37,5 +37,9 @@ fn main() {
 
     //You can insert something like a http server here which will enable you to
     //interact with the manager via browser/curl.
+    // let server_handle = thread::spawn(move || {
+    //    MyServer::new(connection.pool, connection.shared_num).start(); 
+    // });
+
     connection_manager.start();
 }

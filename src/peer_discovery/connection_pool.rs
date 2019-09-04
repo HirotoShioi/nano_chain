@@ -18,6 +18,9 @@ pub enum PoolMessage {
 
 use super::connection_pool::PoolMessage::*;
 
+/// Pool manager is responsible for adding/deleting `Connection` from the connection pool.
+/// 
+/// Other threads can send messages to pool manager via `Sender<PoolMessage>`
 pub fn start_pool_manager(
     my_addr: SocketAddr,
     conn_pool: ConnectionPool,

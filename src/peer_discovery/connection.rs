@@ -13,13 +13,15 @@ use super::connection_pool::{ConnectionPool, PoolMessage};
 use super::util::ChanMessage::*;
 use super::util::*;
 
+///Time out duration for reading message from TCP stream
 const READ_TIME_OUT: u64 = 200;
 
 ///Connection handles message handling between peers
 ///It will start send and recv thread once instantiated.
 pub struct Connection {
-    // Perhaps add id field?
+    /// Address we're connecting to
     pub address: SocketAddr,
+    /// Stream 
     pub stream: TcpStream,
     // Thread handle for send operation
     pub send_thread: Option<JoinHandle<()>>,
@@ -27,12 +29,16 @@ pub struct Connection {
     pub recv_thread: Option<JoinHandle<()>>,
     // Used to send message to the peer
     pub conn_sender: MessageSender<ProtocolMessage>,
-    // Used to shutdown connection gracefully
+    // Used to shutdown `Connection` gracefully
     pub done: Arc<AtomicBool>,
 }
 
+/// `Connection` is a handler for each connection we make with other peer
+/// It will be responsible for sending & receiving messages between us and the others.
 impl Connection {
-    ///Instantiate `Connection` and insert it into `ConnectionPool`
+    ///Instantiate `Connection`
+    ///
+    /// This will create threads for sending and receiving messages from TcpStream
     pub fn connect_stream(
         their_addr: SocketAddr,
         stream: TcpStream,
@@ -102,7 +108,18 @@ impl Connection {
     }
 
     /// Create TCPStream with given SocketAddr
-    ///If connection is successful, instantiate `Connection`
+    /// 
+    ///This will perform a handshake between opponent to reach an
+    /// agreement on whether they can talk to one another.
+    /// 
+    /// Agreement will fail if:
+    /// 
+    /// - Opponent sends invalid message. Any message other than `ConnectionAccepted`
+    /// will mean we're not able to talk to them.
+    /// 
+    /// - Opponent cannot be reached (Network error)
+    /// 
+    /// - Opponent does not have the capacity to talk with us
     pub fn connect(
         my_address: SocketAddr,
         their_address: SocketAddr,
@@ -245,7 +262,9 @@ pub fn handle_recv_message(
     Ok(())
 }
 
-//This can be tested!
+///This will determine whether we can connect to the given `SocketAddr`
+/// 
+/// If not, this will return `Some` with the reason.
 pub fn is_connection_acceptable(
     socket_addr: &SocketAddr,
     conn_pool: &ConnectionPool,
@@ -261,6 +280,7 @@ pub fn is_connection_acceptable(
     }
 }
 
+/// List of message that are being used within the procotol
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum ProtocolMessage {
     Ping,
@@ -285,8 +305,11 @@ pub enum ProtocolMessage {
 
 use super::connection::ProtocolMessage::*;
 
+// Using these functions will allow us to have strongly typed communication with
+// one another.
 // Want to make these functions generic
-///Send `ProtocolMessage` the given stream
+
+///Send `ProtocolMessage` the given TcpStream
 pub fn send_message(
     //Address you're sending to
     their_addr: &SocketAddr,
@@ -301,12 +324,12 @@ pub fn send_message(
     Ok(())
 }
 
-///Send `ReadMessage` from given stream
+///Read `ProtocolMessage` from given TcpStream
 pub fn read_message(stream: &TcpStream) -> PeerResult<ProtocolMessage> {
     let mut reader = BufReader::new(stream);
     let mut buffer = String::new();
     reader.read_line(&mut buffer)?;
-    let recv_message: ProtocolMessage = serde_json::from_str(&buffer)?;
+    let recv_message: ProtocolMessage = serde_json::from_str(&buffer)?; // Should throw error if unable to parse
     trace!("Got message: {:?}", recv_message);
     Ok(recv_message)
 }

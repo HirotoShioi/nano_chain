@@ -23,25 +23,39 @@ use connection_pool::{start_pool_manager, ConnectionPool, PoolMessage};
 pub use util::PeerError;
 use util::{MessageSender, PeerResult};
 
-///Connection pool handling messages between peers
-
 ///Connection manager is responsible of managing listener.
-///It also should provide interface that other modules can use
+///
+///(TODO:) It also should provide interface that other modules can use
 #[derive(Clone)]
 pub struct ConnectionManager {
+    /// Bind TcpListener on given port which will used for receiving messages from
+    /// other peers
     server_address: SocketAddr,
+    /// Vector of addresses the manager will initially connect to
     addrs: Vec<SocketAddr>,
+    /// Capacity of the connection pool
     capacity: usize,
+    /// Flag for control messenger thread
     messenger_done: Arc<AtomicBool>,
+    /// Whether we want to perform mining
     mining: bool,
+    /// `ConnectionPool`
     pools: ConnectionPool,
+    /// Number shared between the network
     shared_num: Arc<AtomicU32>,
+    /// Interval for checking whether we want to have more connection
     connection_check_interval: u64,
+    /// Minimal delay for performing mining
     mining_delay_lowerbound: u64,
+    /// Maximum delay for performing mining
     mining_delay_upperbound: u64,
+    /// Minimum broadcast delay when broadcasting generated number
     broadcast_delay_lowerbound: u64,
+    /// Maximum broadcast delay when broadcasting generated number
     broadcast_delay_upperbound: u64,
+    /// Minimum amount of number being added to the existing number
     add_num_lowerbound: u32,
+    /// Maximum amount of number being added to the existing number
     add_num_upperbound: u32,
 }
 
@@ -78,6 +92,8 @@ impl ConnectionManager {
         Ok(conn_manager)
     }
 
+    ///Run conneciton manager, starting threads which are needed to perform
+    /// communication between other peers
     pub fn start(&self) {
         info!("Starting the node");
         // If start is not being called, main thread will die
@@ -137,8 +153,9 @@ impl ConnectionManager {
     }
 }
 
-///Start the network server by binding to given address
-// If listener cannot be binded, let the program crash.
+///Start the network server by binding to given address.
+/// 
+// (TODO): If listener cannot be binded, let the program crash.
 fn start_listener(
     pools: ConnectionPool,
     conn_sender: MessageSender<PoolMessage>,
@@ -183,6 +200,8 @@ fn start_listener(
     }
 }
 
+///Start a thread which will regularly check the current `ConnectionPool` to see if we are
+/// capabale of adding new connection. If yes, it will ask the other peers for new connection.
 fn start_messenger(
     interval: u64,
     conn_pool: ConnectionPool,
@@ -214,6 +233,7 @@ fn start_messenger(
     Ok(messender_handle)
 }
 
+///Start a thread which will perform mining
 fn start_mining(manager: ConnectionManager, mining_done: Arc<AtomicBool>) -> JoinHandle<()> {
     let handle = thread::spawn(move || {
         while !mining_done.load(Ordering::Relaxed) {
