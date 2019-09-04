@@ -1,9 +1,9 @@
+use log::warn;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use log::{warn, info};
 
 use super::connection::{is_connection_acceptable, Connection};
 use super::util::ChanMessage::*;

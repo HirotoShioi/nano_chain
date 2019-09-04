@@ -1,3 +1,4 @@
+use log::{info, trace, warn};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::io::prelude::*;
@@ -7,7 +8,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use log::{info, trace, warn};
 
 use super::connection_pool::{ConnectionPool, PoolMessage};
 use super::util::ChanMessage::*;
@@ -148,28 +148,6 @@ impl Drop for Connection {
     }
 }
 
-/// Broadcast given `message` to the known peers
-pub fn broadcast(pools: &ConnectionPool, message: ProtocolMessage) -> PeerResult<()> {
-    let mut pools = pools.lock().unwrap();
-    // If any of the `send` fails, store the `SocketAddr` here so it can later be
-    // removed.
-    let mut failed_addr = Vec::new();
-
-    for (socket_addr, conn) in pools.iter_mut() {
-        if conn.conn_sender.send(message.to_owned()).is_err() {
-            failed_addr.push(socket_addr.to_owned());
-        };
-    }
-
-    //Remove this
-    //Use PoolMessage::Delete instead
-    for socket_addr in failed_addr.iter() {
-        pools.remove(socket_addr);
-    }
-
-    Ok(())
-}
-
 ///Read messages from the `TcpStream` and handle them accordingly
 pub fn handle_recv_message(
     their_addr: SocketAddr,
@@ -181,20 +159,35 @@ pub fn handle_recv_message(
     if let Ok(recv_message) = read_message(&stream) {
         match recv_message {
             Ping => send_message(&their_addr, &stream, Pong)?,
-            NewNumber(their_address, their_num) => {
-                info!("New value from {:?}: {:?}", their_address, their_num);
+            NewNumber(miner_address, their_num) => {
+                info!("New value from {:?}: {:?}", miner_address, their_num);
                 let my_num = shared_num.load(Ordering::Relaxed);
                 //If their number and your number is same, ignore it
                 if my_num < their_num {
-                    info!("Their number({:?}) is bigger than ours({:?}), accepting", their_num, my_num);
+                    info!(
+                        "Their number({:?}) is bigger than ours({:?}), accepting",
+                        their_num, my_num
+                    );
                     shared_num.store(their_num, Ordering::Relaxed);
 
-                    send_message(&their_addr, &stream, NumAccepted(their_num))
-                        .expect("Unable to send accept message");
-                    for conn in pool.lock().unwrap().values() {
-                        if their_address != conn.address {
+                    let pool = pool.lock().unwrap();
+                    if let Some(conn) = pool.get(&miner_address) {
+                        info!(
+                            "Notifying miner({:?}) that the number has been accepted",
+                            miner_address
+                        );
+                        conn.conn_sender.send(NumAccepted(their_num)).unwrap();
+                    }
+                    // This will prevent double send
+                    if miner_address != their_addr {
+                        info!("Replying to {:?} that number was accepted", their_addr);
+                        send_message(&their_addr, &stream, NumAccepted(their_num))
+                            .expect("Unable to send accept message");
+                    }
+                    for conn in pool.values() {
+                        if miner_address != conn.address || their_addr != conn.address {
                             conn.conn_sender
-                                .send(NewNumber(their_address, their_num))
+                                .send(NewNumber(miner_address, their_num))
                                 .expect("Failed to send message");
                         }
                     }
@@ -211,7 +204,10 @@ pub fn handle_recv_message(
             NumDenied(their_num) => {
                 let my_num = shared_num.load(Ordering::Relaxed);
                 if my_num < their_num {
-                    info!("Their number({:?}) is bigger than ours({:?})", their_num, my_num);
+                    info!(
+                        "Their number({:?}) is bigger than ours({:?})",
+                        their_num, my_num
+                    );
                     shared_num.store(their_num, Ordering::Relaxed);
                 }
                 //Should we broadcast it..?
@@ -313,4 +309,13 @@ pub fn read_message(stream: &TcpStream) -> PeerResult<ProtocolMessage> {
     let recv_message: ProtocolMessage = serde_json::from_str(&buffer)?;
     trace!("Got message: {:?}", recv_message);
     Ok(recv_message)
+}
+
+/// Broadcast given `message` to the known peers
+pub fn broadcast(pools: &ConnectionPool, message: ProtocolMessage) -> PeerResult<()> {
+    for (_socket_addr, conn) in pools.lock().unwrap().iter() {
+        conn.conn_sender.send(message.to_owned()).unwrap();
+    }
+
+    Ok(())
 }

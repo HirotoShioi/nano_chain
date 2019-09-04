@@ -1,4 +1,5 @@
 use ctrlc;
+use log::{info, warn};
 use rand::Rng;
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener};
@@ -7,7 +8,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use log::{info, warn};
 
 mod configuration;
 mod connection;
