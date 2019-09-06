@@ -129,10 +129,8 @@ impl ConnectionManager {
         });
 
         //Start mining thread here
-
         let mining_done = Arc::new(AtomicBool::new(!self.mining));
         let mining_handle = start_mining(self.to_owned(), mining_done.to_owned());
-
         let pool = Arc::clone(&self.pools);
         let message_done = self.messenger_done.clone();
         ctrlc::set_handler(move || {
