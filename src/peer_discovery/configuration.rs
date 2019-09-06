@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::fs;
 use std::net::SocketAddr;
 
-/// Configuration used for running the `ConnectionManager`
+/// Configuration used for initializing the `ConnectionManager`
 #[derive(Debug, Deserialize)]
 pub struct NodeConfig {
     pub peer_addresses: Vec<SocketAddr>,

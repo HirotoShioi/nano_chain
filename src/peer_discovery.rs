@@ -92,12 +92,10 @@ impl ConnectionManager {
         Ok(conn_manager)
     }
 
-    ///Run conneciton manager, starting threads which are needed to perform
+    ///Start the connection manager, starting threads which are needed to perform
     /// communication between other peers
     pub fn start(&self) {
         info!("Starting the node");
-        // If start is not being called, main thread will die
-        // Move these into start()
         let (register_handle, addr_sender) = start_pool_manager(
             self.server_address,
             Arc::clone(&self.pools),
@@ -119,6 +117,7 @@ impl ConnectionManager {
         )
         .unwrap();
 
+        //Start the server
         let listener_pool = Arc::clone(&self.pools);
         let server_address = self.server_address;
         let addr_sender = addr_sender.to_owned();
@@ -131,13 +130,15 @@ impl ConnectionManager {
         //Start mining thread here
         let mining_done = Arc::new(AtomicBool::new(!self.mining));
         let mining_handle = start_mining(self.to_owned(), mining_done.to_owned());
+
+        //This will be triggered when `Ctrl-C` was executed
         let pool = Arc::clone(&self.pools);
         let message_done = self.messenger_done.clone();
         ctrlc::set_handler(move || {
             broadcast(&pool, Exiting).unwrap();
             message_done.store(true, Ordering::Relaxed);
             // Clear the connection pool
-            // This will trigger `Drop`, messaging each of connection nodes
+            // This will trigger `Drop` on `Connection`, messaging opponent
             // that we have terminated
             pool.lock().unwrap().clear();
             warn!("Shutting down the node");
@@ -160,8 +161,8 @@ fn start_listener(
     address: SocketAddr,
     shared_num: Arc<AtomicU32>,
 ) {
-    let listener = TcpListener::bind(address).unwrap();
-    // accept connections and process them
+    let listener = TcpListener::bind(address).unwrap(); // Handle them more nicely!
+                                                        // accept connections and process them
     for stream in listener.incoming() {
         let conn_pools = Arc::clone(&pools);
         let conn_sender_c = conn_sender.clone();
@@ -221,7 +222,7 @@ fn start_messenger(
                 let conn_addr: Vec<SocketAddr> = conn_pool.keys().map(|k| k.to_owned()).collect();
                 let ask_message = AskPeer(my_address, conn_addr, conn_len);
                 // You have to drop here explicity or else broadcast will not be
-                // able to lock the connection pool
+                // able to lock the `ConnectionPool`
                 drop(conn_pool);
                 broadcast(&conn_pool_c, ask_message).unwrap();
             }
@@ -235,7 +236,7 @@ fn start_messenger(
 fn start_mining(manager: ConnectionManager, mining_done: Arc<AtomicBool>) -> JoinHandle<()> {
     thread::spawn(move || {
         while !mining_done.load(Ordering::Relaxed) {
-            //sleep for random time
+            //Sleep for random duration
             let mut rng = rand::thread_rng();
             let interval = rng.gen_range(
                 manager.mining_delay_lowerbound,
@@ -243,7 +244,7 @@ fn start_mining(manager: ConnectionManager, mining_done: Arc<AtomicBool>) -> Joi
             );
             thread::sleep(Duration::from_secs(interval));
 
-            //generate random number
+            //Generate random number
             let random_num = rng.gen_range(manager.add_num_lowerbound, manager.add_num_upperbound);
 
             let new_num = manager.shared_num.load(Ordering::Relaxed) + random_num;
@@ -258,8 +259,9 @@ fn start_mining(manager: ConnectionManager, mining_done: Arc<AtomicBool>) -> Joi
             //Broadcast after some delay
             thread::sleep(Duration::from_secs(delay));
 
+            //Other nodes might have broadcasted bigger number before we did.
+            //Check if current number is actually bigger than what we have
             let curr_num = manager.shared_num.load(Ordering::Relaxed);
-
             if new_num > curr_num {
                 info!("Broadcasting: {:?}", new_num);
                 broadcast(&manager.pools, NewNumber(manager.server_address, new_num)).unwrap();

@@ -14,7 +14,6 @@ In most cryptocurrencies, transactions map a number of inputs to a number of
 outputs, roughly as follows:
 
 ```rust
-#[derive(Debug)]
 pub struct Transaction {
     id: TransactionId,
     inputs: Vec<Input>,

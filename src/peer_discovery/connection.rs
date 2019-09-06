@@ -46,7 +46,6 @@ impl Connection {
         conn_sender: MessageSender<PoolMessage>,
         shared_num: Arc<AtomicU32>,
     ) -> PeerResult<Connection> {
-        //Check if address aleady exists in the pool
         let (tx, rx) = channel();
         let done = Arc::new(AtomicBool::new(false));
 
@@ -61,7 +60,7 @@ impl Connection {
                     match message {
                         Message(msg) => {
                             //If write fails due to broken pipe, close the threads
-                            // Make it cleaner
+                            //(TODO): Make it cleaner
                             if send_message(&their_addr, &send_stream, msg).is_err() {
                                 drop(send_stream.try_clone().unwrap());
                                 send_done.store(true, Ordering::Relaxed);
@@ -109,13 +108,13 @@ impl Connection {
 
     /// Create TCPStream with given SocketAddr
     ///
-    ///This will perform a handshake between opponent to reach an
+    ///This will perform a handshake between us and the opponent to reach an
     /// agreement on whether they can talk to one another.
     ///
     /// Agreement will fail if:
     ///
     /// - Opponent sends invalid message. Any message other than `ConnectionAccepted`
-    /// will mean we're not able to talk to them.
+    /// will mean we did not reached to an agreement.
     ///
     /// - Opponent cannot be reached (Network error)
     ///
@@ -239,7 +238,6 @@ pub fn handle_recv_message(
             AskPeer(their_address, their_known_address, _size) => {
                 let mut their_known_address = their_known_address.to_owned();
                 their_known_address.push(their_address);
-                // Bugged
                 let new_addresses: Vec<SocketAddr> = pool
                     .lock()
                     .unwrap()
@@ -292,9 +290,7 @@ pub enum ProtocolMessage {
     CapacityReached,
     AlreadyConnected,
     // Sharing states
-    //Broadcast new number when minted
     NewNumber(SocketAddr, u32),
-    //Reply when you get when network has bigger number
     NumDenied(u32),
     NumAccepted(u32),
     /// Exchange information about peers
@@ -307,7 +303,7 @@ use super::connection::ProtocolMessage::*;
 
 // Using these functions will allow us to have strongly typed communication with
 // one another.
-// Want to make these functions generic
+// (TODO)Make these functions generic
 
 ///Send `ProtocolMessage` the given TcpStream
 pub fn send_message(
