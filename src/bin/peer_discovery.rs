@@ -23,7 +23,7 @@ fn main() {
         )
         .get_matches();
 
-    // Since this is required, we know this value is given
+    // Since value `config` is required, we know this will never fail
     let config_path = matches.value_of("config").unwrap();
     let node_config = read_node_config(config_path).expect("Failed to read file");
 
@@ -41,5 +41,5 @@ fn main() {
     //    MyServer::new(connection.pool, connection.shared_num).start();
     // });
 
-    connection_manager.start();
+    connection_manager.start().expect("Error starting node");
 }

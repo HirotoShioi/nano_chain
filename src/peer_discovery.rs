@@ -94,14 +94,14 @@ impl ConnectionManager {
 
     ///Start the connection manager, starting threads which are needed to perform
     /// communication between other peers
-    pub fn start(&self) {
+    pub fn start(&self) -> Result<(), std::io::Error> {
         info!("Starting the node");
         let (register_handle, addr_sender) = start_pool_manager(
             self.server_address,
             Arc::clone(&self.pools),
             self.shared_num.to_owned(),
         )
-        .unwrap();
+        .expect("Failed to start pool manager");
 
         for address in self.addrs.to_owned().into_iter() {
             addr_sender.send(PoolMessage::Add(address)).unwrap();
@@ -115,7 +115,7 @@ impl ConnectionManager {
             self.capacity,
             self.server_address,
         )
-        .unwrap();
+        .expect("Failed to start messenger");
 
         //Start the server
         let listener_pool = Arc::clone(&self.pools);
@@ -124,7 +124,9 @@ impl ConnectionManager {
         let shared_num_l = Arc::clone(&self.shared_num);
         let _listener_handle = thread::spawn(move || {
             //Error handling
-            start_listener(listener_pool, addr_sender, server_address, shared_num_l);
+            if start_listener(listener_pool, addr_sender, server_address, shared_num_l).is_err() {
+                panic!("Server address is already in use: {:?}", server_address);
+            };
         });
 
         //Start mining thread here
@@ -149,6 +151,8 @@ impl ConnectionManager {
         messenger_handle.join().unwrap();
         register_handle.join().unwrap();
         mining_handle.join().unwrap();
+
+        Ok(())
     }
 }
 
@@ -160,9 +164,9 @@ fn start_listener(
     conn_sender: MessageSender<PoolMessage>,
     address: SocketAddr,
     shared_num: Arc<AtomicU32>,
-) {
-    let listener = TcpListener::bind(address).unwrap(); // Handle them more nicely!
-                                                        // accept connections and process them
+) -> std::io::Result<()> {
+    let listener = TcpListener::bind(address)?; // Handle them more nicely!
+                                                // accept connections and process them
     for stream in listener.incoming() {
         let conn_pools = Arc::clone(&pools);
         let conn_sender_c = conn_sender.clone();
@@ -183,10 +187,7 @@ fn start_listener(
                             shared_num_c,
                         )
                         .expect("Unable to send message");
-                        conn_pools
-                            .lock()
-                            .expect("Unable to lock pool")
-                            .insert(socket_addr, conn);
+                        conn_pools.lock().unwrap().insert(socket_addr, conn);
                     }
                     Some(err_message) => send_message(&socket_addr, &stream, err_message)
                         .expect("Unable to send message"),
@@ -197,6 +198,7 @@ fn start_listener(
             }
         });
     }
+    Ok(())
 }
 
 ///Start a thread which will regularly check the current `ConnectionPool` to see if we are

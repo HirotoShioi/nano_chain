@@ -62,7 +62,9 @@ impl Connection {
                             //If write fails due to broken pipe, close the threads
                             //(TODO): Make it cleaner
                             if send_message(&their_addr, &send_stream, msg).is_err() {
-                                drop(send_stream.try_clone().unwrap());
+                                send_stream
+                                    .shutdown(Shutdown::Both)
+                                    .expect("Failed to shutdown stream");
                                 send_done.store(true, Ordering::Relaxed);
                             };
                             send_stream.flush().expect("Unable to flush stream");
@@ -79,16 +81,15 @@ impl Connection {
         recv_stream.set_read_timeout(Some(Duration::from_millis(READ_TIME_OUT)))?;
         let recv_thread = thread::spawn(move || {
             while !read_done.load(Ordering::Relaxed) {
-                if handle_recv_message(
+                match handle_recv_message(
                     their_addr,
                     &recv_stream,
                     &conn_pool,
                     conn_sender.clone(),
                     &shared_num,
-                )
-                .is_ok()
-                {
-                    recv_stream.flush().unwrap();
+                ) {
+                    Ok(_) => recv_stream.flush().unwrap(),
+                    Err(_) => recv_stream.shutdown(Shutdown::Both).unwrap(),
                 }
             }
         });
@@ -197,20 +198,16 @@ pub fn handle_recv_message(
                     // This will prevent double send
                     if miner_address != their_addr {
                         info!("Replying to {:?} that number was accepted", their_addr);
-                        send_message(&their_addr, &stream, NumAccepted(their_num))
-                            .expect("Unable to send accept message");
+                        send_message(&their_addr, &stream, NumAccepted(their_num))?;
                     }
                     for conn in pool.values() {
                         if miner_address != conn.address || their_addr != conn.address {
-                            conn.conn_sender
-                                .send(NewNumber(miner_address, their_num))
-                                .expect("Failed to send message");
+                            conn.conn_sender.send(NewNumber(miner_address, their_num))?;
                         }
                     }
                 } else if my_num > their_num {
                     info!("Our value is bigger({:?}), responsing", my_num);
-                    send_message(&their_addr, &stream, NumDenied(my_num))
-                        .expect("Unable to reply message");
+                    send_message(&their_addr, &stream, NumDenied(my_num))?;
                 }
             }
             NumAccepted(my_num) => {
