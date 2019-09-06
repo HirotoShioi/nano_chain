@@ -72,6 +72,8 @@ Block building code into rust.
 
 ## Peer discovery
 
+Basic implementation of peer-to-peer network capable of propagating shared states.
+
 ![tmux image](./assets/peer_discovery.png)
 
 In a p2p setting, every process acts as both a server and a client. Executing
@@ -131,8 +133,8 @@ tmux
 
 ## Todo
 
-- [] Add tests
-- [] Setup CI
-- [] Better documentation
-- [] Improve exception handling
-- [] Run server which enables you to interact with the node 
+- [ ] Add tests
+- [ ] Setup CI
+- [ ] Better documentation
+- [ ] Improve exception handling
+- [ ] Run server which enables you to interact with the node 
