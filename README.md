@@ -77,7 +77,7 @@ Basic implementation of peer-to-peer network capable of propagating shared state
 ![tmux image](./assets/peer_discovery.png)
 
 In a p2p setting, every process acts as both a server and a client. Executing
-multiple processes will create a network where several processes connect to each
+multiple processes will create a network where each proccess will connect to each
 other. They will also propagate a bit of shared state, which is a biggest number
 within the network.
 
