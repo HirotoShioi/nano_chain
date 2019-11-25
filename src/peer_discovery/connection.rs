@@ -39,13 +39,13 @@ impl Connection {
     ///Instantiate `Connection`
     ///
     /// This will create threads for sending and receiving messages from TcpStream
-    pub fn connect_stream(
+    pub fn from_stream(
         their_addr: SocketAddr,
         stream: TcpStream,
         conn_pool: ConnectionPool,
         conn_sender: MessageSender<PoolMessage>,
         shared_num: Arc<AtomicU32>,
-    ) -> PeerResult<Connection> {
+    ) -> Result<Connection> {
         let (tx, rx) = channel();
         let done = Arc::new(AtomicBool::new(false));
 
@@ -53,25 +53,23 @@ impl Connection {
         let send_done = done.to_owned();
         let mut send_stream = stream.try_clone()?;
         let send_thread = thread::spawn(move || {
-            loop {
-                // Can you make it such that if any of the function fails,
-                // it does the same restore action?
-                if let Ok(message) = rx.recv() {
-                    match message {
-                        Message(msg) => {
-                            //If write fails due to broken pipe, close the threads
-                            //(TODO): Make it cleaner
-                            if send_message(&their_addr, &send_stream, msg).is_err() {
-                                send_stream
-                                    .shutdown(Shutdown::Both)
-                                    .expect("Failed to shutdown stream");
-                                send_done.store(true, Ordering::Relaxed);
-                            };
-                            send_stream.flush().expect("Unable to flush stream");
-                        }
-                        Terminate => break,
+            // Can you make it such that if any of the function fails,
+            // it does the same restore action?
+            while let Some(message) = rx.iter().next() {
+                match message {
+                    Message(msg) => {
+                        //If write fails due to broken pipe, close the threads
+                        //(TODO): Make it cleaner
+                        if send_message(&their_addr, &send_stream, msg).is_err() {
+                            send_stream
+                                .shutdown(Shutdown::Both)
+                                .expect("Failed to shutdown stream");
+                            send_done.store(true, Ordering::Relaxed);
+                        };
+                        send_stream.flush().expect("Unable to flush stream");
                     }
-                };
+                    Terminate => break,
+                }
             }
         });
 
@@ -126,19 +124,14 @@ impl Connection {
         conn_pool: ConnectionPool,
         conn_sender: MessageSender<PoolMessage>,
         shared_num: Arc<AtomicU32>,
-    ) -> PeerResult<Connection> {
+    ) -> Result<Connection> {
         info!("Attempting to connect to the node: {:?}", their_address);
         let stream = TcpStream::connect(their_address)?;
         send_message(&their_address, &stream, Request(my_address))?;
         if let Ok(ConnectionAccepted) = read_message(&stream) {
-            let conn = Connection::connect_stream(
-                their_address,
-                stream,
-                conn_pool,
-                conn_sender,
-                shared_num,
-            )
-            .unwrap();
+            let conn =
+                Connection::from_stream(their_address, stream, conn_pool, conn_sender, shared_num)
+                    .unwrap();
             Ok(conn)
         } else {
             Err(Box::new(PeerError::ConnectionDenied))
@@ -172,7 +165,7 @@ pub fn handle_recv_message(
     pool: &ConnectionPool,
     conn_sender: MessageSender<PoolMessage>,
     shared_num: &Arc<AtomicU32>,
-) -> PeerResult<()> {
+) -> Result<()> {
     if let Ok(recv_message) = read_message(&stream) {
         match recv_message {
             Ping => send_message(&their_addr, &stream, Pong)?,
@@ -308,7 +301,7 @@ pub fn send_message(
     their_addr: &SocketAddr,
     stream: &TcpStream,
     message: ProtocolMessage,
-) -> PeerResult<()> {
+) -> Result<()> {
     trace!("Sending message to: {:?},  {:?}", their_addr, message);
     let mut stream_clone = stream.try_clone()?;
     serde_json::to_writer(stream, &message)?;
@@ -318,7 +311,7 @@ pub fn send_message(
 }
 
 ///Read `ProtocolMessage` from given TcpStream
-pub fn read_message(stream: &TcpStream) -> PeerResult<ProtocolMessage> {
+pub fn read_message(stream: &TcpStream) -> Result<ProtocolMessage> {
     let mut reader = BufReader::new(stream);
     let mut buffer = String::new();
     reader.read_line(&mut buffer)?;
@@ -328,7 +321,7 @@ pub fn read_message(stream: &TcpStream) -> PeerResult<ProtocolMessage> {
 }
 
 /// Broadcast given `message` to the known peers
-pub fn broadcast(pools: &ConnectionPool, message: ProtocolMessage) -> PeerResult<()> {
+pub fn broadcast(pools: &ConnectionPool, message: ProtocolMessage) -> Result<()> {
     for (_socket_addr, conn) in pools.lock().unwrap().iter() {
         conn.conn_sender.send(message.to_owned()).unwrap();
     }

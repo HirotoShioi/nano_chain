@@ -20,8 +20,8 @@ pub use connection::ProtocolMessage::{self, *};
 use connection::{broadcast, is_connection_acceptable, Connection};
 use connection::{read_message, send_message};
 use connection_pool::{start_pool_manager, ConnectionPool, PoolMessage};
+use util::MessageSender;
 pub use util::PeerError;
-use util::{MessageSender, PeerResult};
 
 ///Connection manager is responsible of managing listener.
 ///
@@ -179,7 +179,8 @@ fn start_listener(
                 match is_connection_acceptable(&socket_addr, &conn_pools) {
                     None => {
                         send_message(&socket_addr, &stream, ConnectionAccepted).unwrap();
-                        let conn = Connection::connect_stream(
+                        let sender = conn_sender_c.clone();
+                        let conn = Connection::from_stream(
                             socket_addr.to_owned(),
                             stream,
                             conn_pools_c,
@@ -187,7 +188,10 @@ fn start_listener(
                             shared_num_c,
                         )
                         .expect("Unable to send message");
-                        conn_pools.lock().unwrap().insert(socket_addr, conn);
+                        sender
+                            .clone()
+                            .send(PoolMessage::AddConn(conn.address, conn))
+                            .unwrap();
                     }
                     Some(err_message) => send_message(&socket_addr, &stream, err_message)
                         .expect("Unable to send message"),
@@ -209,7 +213,7 @@ fn start_messenger(
     messenger_done: Arc<AtomicBool>,
     capacity: usize,
     my_address: SocketAddr,
-) -> PeerResult<JoinHandle<()>> {
+) -> util::Result<JoinHandle<()>> {
     let messenger_done_c = Arc::clone(&messenger_done);
     let messender_handle = thread::spawn(move || {
         while !messenger_done_c.load(Ordering::Relaxed) {
