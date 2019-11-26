@@ -4,9 +4,9 @@ server_address: 127.0.0.1:8003
 capacity: 2
 connection_check_interval: 30
 mining: false
-mining_delay_lowerbound: 10
-mining_delay_upperbound: 20
-broadcast_delay_lowerbound: 1
-broadcast_delay_upperbound: 3
-add_num_lowerbound: 10
-add_num_upperbound: 20
+minimum_mining_delay: 10
+mining_delay_interval: 10
+minimum_broadcast_delay: 5
+broadcast_delay_interval: 5
+minimum_add_num: 10
+add_num_range: 30

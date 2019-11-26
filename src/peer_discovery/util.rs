@@ -1,28 +1,4 @@
-use std::sync::mpsc::{self, Receiver, RecvError, SendError, Sender};
-
-pub type PeerResult<T> = Result<T, Box<dyn std::error::Error>>;
-
-#[derive(Debug)]
-pub enum PeerError {
-    NoPool,
-    FailedToCreateConnection,
-    UnableToConnect,
-    ConnectionDenied,
-}
-
-impl std::fmt::Display for PeerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let error_message = match self {
-            PeerError::NoPool => "No connection available",
-            PeerError::FailedToCreateConnection => "Failed to create connection",
-            PeerError::UnableToConnect => "Unable to connect to the peer",
-            PeerError::ConnectionDenied => "Connection request was rejected",
-        };
-        write!(f, "{}", error_message)
-    }
-}
-
-impl std::error::Error for PeerError {}
+use std::sync::mpsc::{self, Iter, Receiver, RecvError, SendError, Sender};
 
 ///This can let you send `Terminate` on any given channel that sends data of type <T>
 pub enum ChanMessage<T> {
@@ -60,6 +36,10 @@ pub struct MessageReceiver<T>(Receiver<ChanMessage<T>>);
 impl<T> MessageReceiver<T> {
     pub fn recv(&self) -> Result<ChanMessage<T>, RecvError> {
         self.0.recv()
+    }
+
+    pub fn iter(&self) -> Iter<ChanMessage<T>> {
+        self.0.iter()
     }
 }
 

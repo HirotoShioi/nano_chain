@@ -10,8 +10,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use super::connection_pool::{ConnectionPool, PoolMessage};
-use super::util::ChanMessage::*;
-use super::util::*;
+use super::error::{PeerError, Result};
+use super::util::{channel, ChanMessage::*, MessageSender};
 
 ///Time out duration for reading message from TCP stream
 const READ_TIME_OUT: u64 = 200;
@@ -39,13 +39,13 @@ impl Connection {
     ///Instantiate `Connection`
     ///
     /// This will create threads for sending and receiving messages from TcpStream
-    pub fn connect_stream(
+    pub fn from_stream(
         their_addr: SocketAddr,
         stream: TcpStream,
         conn_pool: ConnectionPool,
         conn_sender: MessageSender<PoolMessage>,
         shared_num: Arc<AtomicU32>,
-    ) -> PeerResult<Connection> {
+    ) -> Result<Connection> {
         let (tx, rx) = channel();
         let done = Arc::new(AtomicBool::new(false));
 
@@ -53,23 +53,23 @@ impl Connection {
         let send_done = done.to_owned();
         let mut send_stream = stream.try_clone()?;
         let send_thread = thread::spawn(move || {
-            loop {
-                // Can you make it such that if any of the function fails,
-                // it does the same restore action?
-                if let Ok(message) = rx.recv() {
-                    match message {
-                        Message(msg) => {
-                            //If write fails due to broken pipe, close the threads
-                            //(TODO): Make it cleaner
-                            if send_message(&their_addr, &send_stream, msg).is_err() {
-                                drop(send_stream.try_clone().unwrap());
-                                send_done.store(true, Ordering::Relaxed);
-                            };
-                            send_stream.flush().expect("Unable to flush stream");
-                        }
-                        Terminate => break,
+            // Can you make it such that if any of the function fails,
+            // it does the same restore action?
+            while let Some(message) = rx.iter().next() {
+                match message {
+                    Message(msg) => {
+                        //If write fails due to broken pipe, close the threads
+                        //(TODO): Make it cleaner
+                        if send_message(&their_addr, &send_stream, msg).is_err() {
+                            send_stream
+                                .shutdown(Shutdown::Both)
+                                .expect("Failed to shutdown stream");
+                            send_done.store(true, Ordering::Relaxed);
+                        };
+                        send_stream.flush().expect("Unable to flush stream");
                     }
-                };
+                    Terminate => break,
+                }
             }
         });
 
@@ -79,16 +79,15 @@ impl Connection {
         recv_stream.set_read_timeout(Some(Duration::from_millis(READ_TIME_OUT)))?;
         let recv_thread = thread::spawn(move || {
             while !read_done.load(Ordering::Relaxed) {
-                if handle_recv_message(
+                match handle_recv_message(
                     their_addr,
                     &recv_stream,
                     &conn_pool,
                     conn_sender.clone(),
                     &shared_num,
-                )
-                .is_ok()
-                {
-                    recv_stream.flush().unwrap();
+                ) {
+                    Ok(_) => recv_stream.flush().unwrap(),
+                    Err(_) => recv_stream.shutdown(Shutdown::Both).unwrap(),
                 }
             }
         });
@@ -125,19 +124,14 @@ impl Connection {
         conn_pool: ConnectionPool,
         conn_sender: MessageSender<PoolMessage>,
         shared_num: Arc<AtomicU32>,
-    ) -> PeerResult<Connection> {
+    ) -> Result<Connection> {
         info!("Attempting to connect to the node: {:?}", their_address);
         let stream = TcpStream::connect(their_address)?;
         send_message(&their_address, &stream, Request(my_address))?;
         if let Ok(ConnectionAccepted) = read_message(&stream) {
-            let conn = Connection::connect_stream(
-                their_address,
-                stream,
-                conn_pool,
-                conn_sender,
-                shared_num,
-            )
-            .unwrap();
+            let conn =
+                Connection::from_stream(their_address, stream, conn_pool, conn_sender, shared_num)
+                    .unwrap();
             Ok(conn)
         } else {
             Err(Box::new(PeerError::ConnectionDenied))
@@ -171,7 +165,7 @@ pub fn handle_recv_message(
     pool: &ConnectionPool,
     conn_sender: MessageSender<PoolMessage>,
     shared_num: &Arc<AtomicU32>,
-) -> PeerResult<()> {
+) -> Result<()> {
     if let Ok(recv_message) = read_message(&stream) {
         match recv_message {
             Ping => send_message(&their_addr, &stream, Pong)?,
@@ -179,42 +173,44 @@ pub fn handle_recv_message(
                 info!("New value from {:?}: {:?}", miner_address, their_num);
                 let my_num = shared_num.load(Ordering::Relaxed);
                 //If their number and your number is same, ignore it
-                if my_num < their_num {
-                    info!(
-                        "Their number({:?}) is bigger than ours({:?}), accepting",
-                        their_num, my_num
-                    );
-                    shared_num.store(their_num, Ordering::Relaxed);
+                use std::cmp;
 
-                    let pool = pool.lock().unwrap();
-                    if let Some(conn) = pool.get(&miner_address) {
+                match my_num.cmp(&their_num) {
+                    cmp::Ordering::Less => {
                         info!(
-                            "Notifying miner({:?}) that the number has been accepted",
-                            miner_address
+                            "Their number({:?}) is bigger than ours({:?}), accepting",
+                            their_num, my_num
                         );
-                        conn.conn_sender.send(NumAccepted(their_num)).unwrap();
-                    }
-                    // This will prevent double send
-                    if miner_address != their_addr {
-                        info!("Replying to {:?} that number was accepted", their_addr);
-                        send_message(&their_addr, &stream, NumAccepted(their_num))
-                            .expect("Unable to send accept message");
-                    }
-                    for conn in pool.values() {
-                        if miner_address != conn.address || their_addr != conn.address {
-                            conn.conn_sender
-                                .send(NewNumber(miner_address, their_num))
-                                .expect("Failed to send message");
+                        shared_num.store(their_num, Ordering::Relaxed);
+
+                        let pool = pool.lock().unwrap();
+                        if let Some(conn) = pool.get(&miner_address) {
+                            info!(
+                                "Notifying miner {:?} that the number has been accepted",
+                                miner_address
+                            );
+                            conn.conn_sender.send(NumAccepted(their_num)).unwrap();
+                        }
+                        // This will prevent double send
+                        if miner_address != their_addr {
+                            info!("Replying to {:?} that number was accepted", their_addr);
+                            send_message(&their_addr, &stream, NumAccepted(their_num))?;
+                        }
+                        for conn in pool.values() {
+                            if miner_address != conn.address || their_addr != conn.address {
+                                conn.conn_sender.send(NewNumber(miner_address, their_num))?;
+                            }
                         }
                     }
-                } else if my_num > their_num {
-                    info!("Our value is bigger({:?}), responsing", my_num);
-                    send_message(&their_addr, &stream, NumDenied(my_num))
-                        .expect("Unable to reply message");
+                    cmp::Ordering::Greater => {
+                        info!("Our value is bigger({:?}), responsing", my_num);
+                        send_message(&their_addr, &stream, NumDenied(my_num))?;
+                    }
+                    cmp::Ordering::Equal => {}
                 }
             }
             NumAccepted(my_num) => {
-                info!("Number accepted: {:?}", my_num);
+                info!("Peer ({}) accepted number: {:?}", their_addr, my_num);
                 shared_num.store(my_num, Ordering::Relaxed);
             }
             NumDenied(their_num) => {
@@ -236,7 +232,7 @@ pub fn handle_recv_message(
                 }
             }
             AskPeer(their_address, their_known_address, _size) => {
-                let mut their_known_address = their_known_address.to_owned();
+                let mut their_known_address = their_known_address;
                 their_known_address.push(their_address);
                 let new_addresses: Vec<SocketAddr> = pool
                     .lock()
@@ -311,7 +307,7 @@ pub fn send_message(
     their_addr: &SocketAddr,
     stream: &TcpStream,
     message: ProtocolMessage,
-) -> PeerResult<()> {
+) -> Result<()> {
     trace!("Sending message to: {:?},  {:?}", their_addr, message);
     let mut stream_clone = stream.try_clone()?;
     serde_json::to_writer(stream, &message)?;
@@ -321,7 +317,7 @@ pub fn send_message(
 }
 
 ///Read `ProtocolMessage` from given TcpStream
-pub fn read_message(stream: &TcpStream) -> PeerResult<ProtocolMessage> {
+pub fn read_message(stream: &TcpStream) -> Result<ProtocolMessage> {
     let mut reader = BufReader::new(stream);
     let mut buffer = String::new();
     reader.read_line(&mut buffer)?;
@@ -331,7 +327,7 @@ pub fn read_message(stream: &TcpStream) -> PeerResult<ProtocolMessage> {
 }
 
 /// Broadcast given `message` to the known peers
-pub fn broadcast(pools: &ConnectionPool, message: ProtocolMessage) -> PeerResult<()> {
+pub fn broadcast(pools: &ConnectionPool, message: ProtocolMessage) -> Result<()> {
     for (_socket_addr, conn) in pools.lock().unwrap().iter() {
         conn.conn_sender.send(message.to_owned()).unwrap();
     }

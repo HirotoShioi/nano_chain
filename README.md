@@ -61,7 +61,7 @@ pub struct UTXO {
 
 The outputs contained in this map are exactly the unspent outputs. In order to
 refer to an `Output`, we need its transaction id and its index, therefore the keys
-in this map are of type Input.
+in this map are of type `Input`.
 
 ## Basic proof of Work
 
