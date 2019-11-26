@@ -33,7 +33,7 @@ fn main() {
         .init();
     info!("{:#?}", node_config);
 
-    let connection_manager = ConnectionManager::new(node_config).unwrap();
+    let connection_manager = ConnectionManager::new(node_config);
 
     //You can insert something like a http server here which will enable you to
     //interact with the manager via browser/curl.

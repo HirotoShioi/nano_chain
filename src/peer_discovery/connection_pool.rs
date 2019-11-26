@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use super::connection::{is_connection_acceptable, Connection};
-use super::util::ChanMessage::*;
-use super::util::*;
+use super::error::Result;
+use super::util::{channel, ChanMessage::*, MessageSender};
 
 pub type ConnectionPool = Arc<Mutex<HashMap<SocketAddr, Connection>>>;
 
